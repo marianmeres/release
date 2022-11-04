@@ -1,0 +1,35 @@
+{
+  "name": "@marianmeres/release",
+  "version": "0.0.1",
+  "description": "Little helper script to automate releasing a new version tag.",
+  "main": "release.js",
+  "bin": "release.js",
+  "scripts": {
+    "prettier": "prettier --write \"release.js\""
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/marianmeres/release.git"
+  },
+  "keywords": [
+    "git",
+    "tag",
+    "package.json",
+    "version"
+  ],
+  "author": "Marian Meres <marian@meres.sk>",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/marianmeres/release/issues"
+  },
+  "homepage": "https://github.com/marianmeres/release#readme",
+  "dependencies": {
+    "kleur": "^4.1.5",
+    "minimist": "^1.2.7",
+    "prompt": "^1.3.0"
+  },
+  "devDependencies": {
+    "@types/node": "^18.11.9",
+    "prettier": "^2.7.1"
+  }
+}
