@@ -84,7 +84,7 @@ async function doJob() {
 
 		console.log(
 			green(
-				`\n    ${VERSION_NEW} ${gray(
+				`\n    ✓ ${VERSION_NEW} ${gray(
 					`(you still need to manually push the commit and tag)`
 				)}\n`
 			)
