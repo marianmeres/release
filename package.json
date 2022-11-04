@@ -7,6 +7,9 @@
   "scripts": {
     "prettier": "prettier --write \"release.js\""
   },
+  "files": [
+    "release.js"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/marianmeres/release.git"
