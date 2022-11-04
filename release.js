@@ -13,10 +13,7 @@ const isYes = !!args.yes;
 const isHelp = !!args.h || !!args.help;
 const DIRS = ['.', ...toUnqArr(args.d), ...toUnqArr(args.dir)];
 let VERSION_NEW = `${args.v || ''}`.trim() || '1';
-const FIRST_DIR = DIRS.find((d) => fs.existsSync(path.join(d, 'package.json')));
-const VERSION_OLD = JSON.parse(
-	fs.readFileSync(path.join(FIRST_DIR, 'package.json'), 'utf8')
-).version;
+const VERSION_OLD = JSON.parse(fs.readFileSync('package.json', 'utf8')).version;
 
 // return early with help?
 if (isHelp) return help();
