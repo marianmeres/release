@@ -1,6 +1,6 @@
 {
   "name": "@marianmeres/release",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "description": "Little helper script to automate releasing a new version tag.",
   "main": "release.js",
   "bin": "release.js",
