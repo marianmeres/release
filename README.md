@@ -7,6 +7,17 @@ If specified, `npm version` is executed over multiple sub dirs.
 
 The script will prompt you for confirmation, unless called with `--yes` arg.
 
+## The workflow
+1. do work
+2. commit
+3. call `npx release`
+4. confirm version change
+5. `git push` && `git push origin vX.Y.Z` manually
+
+## Todo
+
+- Automate point 5. from the above as well (after prompt confirmation)
+
 ## Install and execute
 
 ```shell
