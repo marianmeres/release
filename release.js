@@ -12,23 +12,21 @@ const args = require('minimist')(process.argv.slice(2));
 const isYes = !!args.yes;
 const isHelp = !!args.h || !!args.help;
 const DIRS = ['.', ...toUnqArr(args.d), ...toUnqArr(args.dir)];
-let VERSION_NEW = `${args.v || ''}`.trim() || '1';
 const VERSION_OLD = JSON.parse(fs.readFileSync('package.json', 'utf8')).version;
+const VERSION_SUFFIX = args.suffix ? `-${args.suffix}` : '';
+const GIT_TAG_PREFIX_NONE = !!args['git-tag-prefix-none'];
+const GIT_TAG_PREFIX = GIT_TAG_PREFIX_NONE ? '' : args['git-tag-prefix'] || 'v';
+
+const VERSION_NEW = buildVersionString(
+	VERSION_OLD,
+	`${args.v || ''}`.trim() || 'patch',
+	VERSION_SUFFIX
+);
+
+const GIT_TAG_NAME = GIT_TAG_PREFIX + VERSION_NEW;
 
 // return early with help?
 if (isHelp) return help();
-
-// auto increment version (if +1)
-if (/^\+?1$/.test(VERSION_NEW)) {
-	VERSION_NEW =
-		'v' +
-		VERSION_OLD.split('.')
-			.map((v, idx) => {
-				if (idx === 2) v = parseInt(v) + 1;
-				return v;
-			})
-			.join('.');
-}
 
 // (auto) message
 let MESSAGE = `Release ${VERSION_NEW}`;
@@ -47,7 +45,10 @@ async function main() {
 			name: 'yn',
 			message: yellow(
 				[
-					`This will change version from "${VERSION_OLD}" to "${cyan(VERSION_NEW)}"...`,
+					`This will change version from "${VERSION_OLD}" to "${cyan(VERSION_NEW)}"`,
+					GIT_TAG_NAME === VERSION_NEW
+						? '...'
+						: ` (tagged as "${cyan(GIT_TAG_NAME)}")...`,
 					DIRS.length > 1
 						? gray(`\n(Affected dirs: ${DIRS.map((v) => `"${v}"`).join(' ')})`)
 						: '',
@@ -74,13 +75,16 @@ async function doJob() {
 	try {
 		// "versionize" each dir/package.json
 		for (const cwd of DIRS) {
-			spawnSync('npm', ['version', VERSION_NEW, '--no-git-tag-version'], { cwd, stdio: 'ignore' });
+			spawnSync('npm', ['version', VERSION_NEW, '--no-git-tag-version'], {
+				cwd,
+				stdio: 'ignore',
+			});
 			spawnSync('git', ['add', 'package.json', 'package-lock.json'], { cwd });
 		}
 
 		// now finalize with git stuff, allowing stdout
 		spawnSync('git', ['commit', '-m', MESSAGE]);
-		spawnSync('git', ['tag', VERSION_NEW]);
+		spawnSync('git', ['tag', GIT_TAG_NAME]);
 
 		console.log(
 			green(
@@ -108,8 +112,13 @@ function onError(e) {
 function help() {
 	console.log(`
     ${yellow('Usage:')}
-        node release.js
-        node release.js [-v +1|vX.Y.Z] [-m message] [--yes] [-d|--dir extraDir]
+        node release.js [-v major|minor|patch|X.Y.Z] (default: "patch")
+                        [-m message]
+                        [--yes]
+                        [--git-tag-prefix prefix]    (default: "v")
+                        [--git-tag-prefix-none]      (will not prefix git tag)
+                        [--suffix suffix]
+                        [-d|--dir extraDir]
 
 `);
 	process.exit();
@@ -119,4 +128,36 @@ function toUnqArr(v) {
 	v ||= [];
 	if (!Array.isArray(v)) v = [v];
 	return Array.from(new Set(v.filter(Boolean)));
+}
+
+function buildVersionString(old, keywordOrVersion, suffix = '') {
+	const parts = old.split('.');
+	const idxMap = { major: 0, minor: 1, patch: 2 };
+	const isKeyword = Object.keys(idxMap).includes(keywordOrVersion);
+
+	let version = keywordOrVersion;
+
+	if (isKeyword) {
+		const idx = idxMap[keywordOrVersion];
+		const oldSegment = parseInt(parts[idx], 10);
+		if (isNaN(oldSegment)) {
+			throw new TypeError(
+				[
+					`Unable to '${keywordOrVersion}' auto increment non-numeric version segment`,
+					`(segment '${parts[idx]}' from '${old}').`,
+				].join(' ')
+			);
+		}
+
+		parts[idx] = oldSegment + 1;
+
+		// reset trailing segments to zero
+		for (let i = idx + 1; i <= 2; i++) {
+			parts[i] = 0;
+		}
+
+		version = parts.join('.');
+	}
+
+	return version + suffix;
 }

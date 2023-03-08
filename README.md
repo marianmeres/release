@@ -10,7 +10,7 @@ The script will prompt you for confirmation, unless called with `--yes` arg.
 ## The workflow
 1. do work
 2. commit
-3. call `npx release`
+3. call `npx release [-v major|minor|patch|x.y.z]` (default is `patch`)
 4. confirm version change
 5. `git push` && `git push origin vX.Y.Z` manually
 
@@ -36,7 +36,7 @@ npx release
 # ...
 #  "scripts": {
 #   ...
-    "release": "npx release" # add args as needed
+    "release": "release" # add args as needed
 #  }
 # ...
 # and then run
@@ -56,7 +56,7 @@ npx release -v v1.2.3
 
 ## Multiple dirs mode
 
-With multiple dirs, always the cwd `./package.json` is read as the significant one to be
+With multiple dirs, always the `{cwd}/package.json` is read as the significant one to be
 bumped. All other dirs (specified via `-d`) are then synced accordingly.
 
 ```
