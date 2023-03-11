@@ -29,7 +29,7 @@ const GIT_TAG_NAME = GIT_TAG_PREFIX + VERSION_NEW;
 if (isHelp) return help();
 
 // (auto) message
-let MESSAGE = `Release ${VERSION_NEW}`;
+let MESSAGE = `Release ${GIT_TAG_NAME}`;
 if (args.m) MESSAGE = `${args.m} (${MESSAGE})`;
 
 // run now
