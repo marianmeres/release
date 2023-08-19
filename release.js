@@ -84,7 +84,7 @@ async function doJob() {
 
 		// now finalize with git stuff, allowing stdout
 		spawnSync('git', ['commit', '-m', MESSAGE]);
-		spawnSync('git', ['tag', '-a', GIT_TAG_NAME, '-m', GIT_TAG_NAME]);
+		spawnSync('git', ['tag', '-a', GIT_TAG_NAME, '-m', MESSAGE]);
 
 		console.log(
 			green(
