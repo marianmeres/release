@@ -1,0 +1,1 @@
+CLI tool to automate package version bumps and git tagging. Wraps npm version, git add, git commit, and git tag with interactive confirmation and support for multi-directory monorepo setups.
