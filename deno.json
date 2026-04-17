@@ -1,6 +1,6 @@
 {
   "name": "@marianmeres/deno-release",
-  "version": "1.3.1",
+  "version": "1.4.0",
   "exports": "./deno-release.ts",
   "tasks": {
     "release": "deno run -A deno-release.ts",
