@@ -2,44 +2,55 @@
 
 /**
  * @module
- * Opinionated CLI tool for releasing Deno projects.
+ * Opinionated CLI tool for releasing Deno / JSR projects.
  *
- * Bumps the version in `deno.json`, creates an annotated git tag,
- * and pushes everything to the remote repository.
+ * Bumps the version in `deno.json` (or `jsr.json`), creates an annotated git
+ * tag, and pushes the commit together with the new tag to the remote
+ * repository.
+ *
+ * Importing this module does not execute the CLI — library consumers can
+ * safely import {@link bumpVersion} without side effects.
  *
  * @example
  * ```bash
  * deno run -A jsr:@marianmeres/deno-release              # defaults to patch
  * deno run -A jsr:@marianmeres/deno-release patch
  * deno run -A jsr:@marianmeres/deno-release minor "Added new feature"
- * deno run -A jsr:@marianmeres/deno-release --yes patch  # skip confirmation prompts
+ * deno run -A jsr:@marianmeres/deno-release --yes patch  # skip confirmations
+ * deno run -A jsr:@marianmeres/deno-release --dry-run minor
  * ```
  */
 
-/** Semantic version bump type */
+/** Semantic version bump type. */
 export type VersionType = "major" | "minor" | "patch";
 
 const VALID_VERSION_TYPES: VersionType[] = ["major", "minor", "patch"];
+
+/** Manifest file names searched, in order of preference. */
+const MANIFEST_CANDIDATES = ["deno.json", "jsr.json"] as const;
 
 // Colors for terminal output
 const red = (s: string): string => `\x1b[31m${s}\x1b[0m`;
 const green = (s: string): string => `\x1b[32m${s}\x1b[0m`;
 const yellow = (s: string): string => `\x1b[33m${s}\x1b[0m`;
 const bold = (s: string): string => `\x1b[1m${s}\x1b[0m`;
+const dim = (s: string): string => `\x1b[2m${s}\x1b[0m`;
 
-/** Result of running a shell command */
+/** Result of running a shell command. */
 interface CommandResult {
 	code: number;
 	stdout: string;
 	stderr: string;
 }
 
+let VERBOSE = false;
+
 /**
  * Executes a shell command and returns the result.
  * @param cmd - Array of command and arguments
- * @returns Promise resolving to command result with exit code, stdout, and stderr
  */
 async function run(cmd: string[]): Promise<CommandResult> {
+	if (VERBOSE) console.log(dim(`$ ${cmd.join(" ")}`));
 	const command = new Deno.Command(cmd[0], {
 		args: cmd.slice(1),
 		stdout: "piped",
@@ -53,11 +64,7 @@ async function run(cmd: string[]): Promise<CommandResult> {
 	};
 }
 
-/**
- * Executes a shell command and exits the process if it fails.
- * @param cmd - Array of command and arguments
- * @returns Promise resolving to stdout on success
- */
+/** Run a command; on non-zero exit, log and terminate the process. */
 async function runOrExit(cmd: string[]): Promise<string> {
 	const { code, stdout, stderr } = await run(cmd);
 	if (code !== 0) {
@@ -68,40 +75,50 @@ async function runOrExit(cmd: string[]): Promise<string> {
 	return stdout;
 }
 
-/**
- * Checks if a file or directory exists at the given path.
- * @param path - Path to check
- * @param isDirectory - If true, checks for directory; otherwise checks for file
- * @returns Promise resolving to true if path exists and matches the type
- */
-async function exists(path: string, isDirectory = false): Promise<boolean> {
+/** Run a command; on non-zero exit, throw (so the caller can clean up / hint). */
+async function runOrThrow(cmd: string[]): Promise<string> {
+	const { code, stdout, stderr } = await run(cmd);
+	if (code !== 0) {
+		throw new Error(
+			`Command failed: ${cmd.join(" ")}${stderr ? `\n${stderr}` : ""}`,
+		);
+	}
+	return stdout;
+}
+
+/** Check whether a plain file exists at `path`. */
+async function fileExists(path: string): Promise<boolean> {
 	try {
 		const stat = await Deno.stat(path);
-		return isDirectory ? stat.isDirectory : stat.isFile;
+		return stat.isFile;
 	} catch {
 		return false;
 	}
 }
 
+const SEMVER_RE = /^(\d+)\.(\d+)\.(\d+)$/;
+
 /**
- * Parses a semver version string into its components.
- * @param version - Version string in format "major.minor.patch"
- * @returns Tuple of [major, minor, patch] numbers
+ * Parses a semver string `X.Y.Z` into numeric components.
+ * @throws on malformed input.
  */
 function parseVersion(version: string): [number, number, number] {
-	const parts = version.split(".").map(Number);
-	if (parts.length !== 3 || parts.some(isNaN)) {
-		console.error(red(`Error: Invalid version format: ${version}`));
-		Deno.exit(1);
+	const m = SEMVER_RE.exec(version);
+	if (!m) {
+		throw new Error(
+			`Invalid version format: ${
+				JSON.stringify(version)
+			} (expected "X.Y.Z" with non-negative integers)`,
+		);
 	}
-	return parts as [number, number, number];
+	return [Number(m[1]), Number(m[2]), Number(m[3])];
 }
 
 /**
  * Bumps a semantic version based on the specified type.
- * @param current - Current version string (e.g., "1.2.3")
- * @param type - Type of version bump: "major", "minor", or "patch"
- * @returns New version string after the bump
+ *
+ * @throws if `current` is not a valid `X.Y.Z` semver string or `type` is not
+ *         one of `"major" | "minor" | "patch"`.
  *
  * @example
  * ```ts
@@ -125,34 +142,44 @@ export function bumpVersion(current: string, type: VersionType): string {
 		case "patch":
 			patch++;
 			break;
+		default:
+			throw new Error(`Invalid bump type: ${JSON.stringify(type)}`);
 	}
 	return `${major}.${minor}.${patch}`;
 }
 
-/**
- * Main entry point for the release CLI.
- *
- * Performs the following steps:
- * 1. Validates git repository and deno.json existence
- * 2. Checks for uncommitted changes
- * 3. Warns if not on main/master branch
- * 4. Shows preview and asks for confirmation
- * 5. Updates version in deno.json
- * 6. Creates commit and annotated tag
- * 7. Pushes to remote repository
- *
- * @returns Promise that resolves when release is complete
- */
-async function main(): Promise<void> {
-	// Parse --yes/-y flag (can appear anywhere in args)
-	const args = Deno.args.filter((arg) => arg !== "--yes" && arg !== "-y");
-	const skipPrompts = Deno.args.length !== args.length;
+/** Detect the indentation string used by a JSON document. */
+function detectIndent(text: string): string {
+	const m = text.match(/\n([ \t]+)"/);
+	return m ? m[1] : "  ";
+}
 
-	const [firstArg, ...messageParts] = args;
+interface ParsedArgs {
+	versionType: VersionType;
+	customMessage: string;
+	skipPrompts: boolean;
+	dryRun: boolean;
+	verbose: boolean;
+}
 
-	// Determine version type and custom message
-	// If first arg is a valid version type, use it; otherwise default to "patch"
-	// and treat all args as the message
+function looksLikeVersionType(arg: string): boolean {
+	if (arg.length > 10 || /\s/.test(arg)) return false;
+	return /^(maj|mij|mjo|min|mni|pat|pth|pac|patc|majo|mino)/i.test(arg);
+}
+
+function parseArgs(argv: string[]): ParsedArgs {
+	const rest: string[] = [];
+	let skipPrompts = false;
+	let dryRun = false;
+	let verbose = false;
+	for (const a of argv) {
+		if (a === "--yes" || a === "-y") skipPrompts = true;
+		else if (a === "--dry-run" || a === "-n") dryRun = true;
+		else if (a === "--verbose" || a === "-v") verbose = true;
+		else rest.push(a);
+	}
+
+	const [firstArg, ...messageParts] = rest;
 	let versionType: VersionType;
 	let customMessage: string;
 
@@ -162,37 +189,103 @@ async function main(): Promise<void> {
 	} else {
 		versionType = "patch";
 		customMessage = firstArg ? [firstArg, ...messageParts].join(" ") : "";
+		if (firstArg && looksLikeVersionType(firstArg)) {
+			console.warn(
+				yellow(
+					`Warning: '${firstArg}' is not a valid version type. ` +
+						`Treating it as part of the commit message and defaulting to 'patch'.`,
+				),
+			);
+		}
 	}
+	return { versionType, customMessage, skipPrompts, dryRun, verbose };
+}
+
+/** Locate the first available manifest file. Returns `null` if none found. */
+async function findManifest(): Promise<string | null> {
+	for (const name of MANIFEST_CANDIDATES) {
+		if (await fileExists(name)) return name;
+	}
+	return null;
+}
+
+/**
+ * Main entry point for the release CLI.
+ *
+ * Performs the following steps:
+ * 1. Parses CLI args (`--yes`, `--dry-run`, `--verbose`, version type, msg)
+ * 2. Validates git repository + manifest existence
+ * 3. Checks for uncommitted changes
+ * 4. Warns if not on main/master branch
+ * 5. Pre-flight: tag must not already exist and `origin` must be configured
+ * 6. Shows preview and asks for confirmation (unless `--yes` / `--dry-run`)
+ * 7. Updates version in the manifest (preserving original indentation)
+ * 8. Creates commit and annotated tag
+ * 9. Pushes the commit and the new tag to `origin`
+ */
+async function main(): Promise<void> {
+	const { versionType, customMessage, skipPrompts, dryRun, verbose } = parseArgs(
+		Deno.args,
+	);
+	VERBOSE = verbose;
 
 	// Check if we're in a git repository (works for submodules too)
-	const { code: gitCheck } = await run(["git", "rev-parse", "--is-inside-work-tree"]);
+	const { code: gitCheck } = await run([
+		"git",
+		"rev-parse",
+		"--is-inside-work-tree",
+	]);
 	if (gitCheck !== 0) {
 		console.error(red("Error: Not in a git repository"));
 		Deno.exit(1);
 	}
 
-	// Check if deno.json exists
-	if (!(await exists("deno.json"))) {
-		console.error(red("Error: deno.json not found"));
+	// Locate manifest
+	const manifestPath = await findManifest();
+	if (!manifestPath) {
+		console.error(
+			red(
+				`Error: No manifest found (looked for ${MANIFEST_CANDIDATES.join(", ")})`,
+			),
+		);
 		Deno.exit(1);
 	}
 
-	// Check if everything is committed
+	// Check for uncommitted changes — allowed in dry-run so preview still works
 	const { stdout: status } = await run(["git", "status", "--porcelain"]);
 	if (status) {
-		console.error(
-			red("Error: You have uncommitted changes. Please commit all changes before releasing.")
-		);
-		const { stdout: shortStatus } = await run(["git", "status", "--short"]);
-		console.log(shortStatus);
-		Deno.exit(1);
+		if (dryRun) {
+			console.warn(
+				yellow(
+					"Warning: uncommitted changes present (ignored because of --dry-run).",
+				),
+			);
+		} else {
+			console.error(
+				red(
+					"Error: You have uncommitted changes. Please commit all changes before releasing.",
+				),
+			);
+			const { stdout: shortStatus } = await run(["git", "status", "--short"]);
+			console.log(shortStatus);
+			Deno.exit(1);
+		}
 	}
 
-	// Check if we're on the main/master branch
-	const currentBranch = await runOrExit(["git", "rev-parse", "--abbrev-ref", "HEAD"]);
+	// Branch check
+	const currentBranch = await runOrExit([
+		"git",
+		"rev-parse",
+		"--abbrev-ref",
+		"HEAD",
+	]);
 	if (currentBranch !== "main" && currentBranch !== "master") {
-		console.log(yellow(`Warning: You're not on main/master branch (current: ${currentBranch})`));
-		if (!skipPrompts) {
+		console.log(
+			yellow(
+				`Warning: You're not on main/master branch (current: ${currentBranch})`,
+			),
+		);
+		if (!skipPrompts && !dryRun) {
 			const answer = prompt("Continue anyway? (y/N):");
 			if (answer?.toLowerCase() !== "y") {
 				Deno.exit(1);
@@ -200,60 +293,132 @@ async function main(): Promise<void> {
 		}
 	}
 
-	// Get current version from deno.json
-	const denoJson = JSON.parse(await Deno.readTextFile("deno.json"));
-	const currentVersion = denoJson.version;
-	if (!currentVersion) {
-		console.error(red("Error: No version field found in deno.json"));
+	// Read & parse manifest
+	const manifestText = await Deno.readTextFile(manifestPath);
+	let manifest: Record<string, unknown>;
+	try {
+		manifest = JSON.parse(manifestText);
+	} catch (e) {
+		console.error(
+			red(`Error: Failed to parse ${manifestPath}: ${(e as Error).message}`),
+		);
 		Deno.exit(1);
 	}
+	const currentVersion = manifest.version;
+	if (typeof currentVersion !== "string") {
+		console.error(
+			red(`Error: No string 'version' field found in ${manifestPath}`),
+		);
+		Deno.exit(1);
+	}
+	console.log(`Manifest:        ${manifestPath}`);
 	console.log(`Current version: ${currentVersion}`);
 
-	// Calculate new version
-	const newVersion = bumpVersion(currentVersion, versionType as VersionType);
-
-	// Show what will happen and ask for confirmation
-	console.log();
-	console.log("This will:");
-	console.log(`  - Bump ${bold(versionType)} version to ${green(newVersion)}`);
-	if (customMessage) {
-		console.log(`  - Create a git tag with message: 'Release: ${newVersion} (${customMessage})'`);
-	} else {
-		console.log(`  - Create a git tag with message: 'Release: ${newVersion}'`);
+	// Compute new version (may throw on malformed current)
+	let newVersion: string;
+	try {
+		newVersion = bumpVersion(currentVersion, versionType);
+	} catch (e) {
+		console.error(red(`Error: ${(e as Error).message}`));
+		Deno.exit(1);
 	}
-	console.log("  - Push to remote repository");
+	const tagName = `v${newVersion}`;
+
+	// ----- Pre-flight checks (all read-only; fail before any mutation) -----
+
+	// Tag must not already exist locally
+	const { code: tagExistsLocal } = await run([
+		"git",
+		"rev-parse",
+		"-q",
+		"--verify",
+		`refs/tags/${tagName}`,
+	]);
+	if (tagExistsLocal === 0) {
+		console.error(red(`Error: Tag ${tagName} already exists locally.`));
+		Deno.exit(1);
+	}
+
+	// An 'origin' remote must be configured (we push to it later)
+	const { code: remoteCode, stderr: remoteErr } = await run([
+		"git",
+		"remote",
+		"get-url",
+		"origin",
+	]);
+	if (remoteCode !== 0) {
+		console.error(red(`Error: No 'origin' remote configured.`));
+		if (remoteErr) console.error(remoteErr);
+		Deno.exit(1);
+	}
+
+	// Build messages
+	const commitMessage = customMessage
+		? `Release: ${newVersion} (${customMessage})`
+		: `Release: ${newVersion}`;
+
+	// Preview
 	console.log();
+	console.log(dryRun ? "This WOULD (dry run):" : "This will:");
+	console.log(
+		`  - Bump ${bold(versionType)} version to ${
+			green(newVersion)
+		} in ${manifestPath}`,
+	);
+	console.log(`  - Create a git commit: '${commitMessage}'`);
+	console.log(`  - Create an annotated git tag: '${tagName}'`);
+	console.log(`  - Push the commit and the '${tagName}' tag to 'origin'`);
+	console.log();
+
+	if (dryRun) {
+		console.log(yellow("Dry run — no changes made."));
+		return;
+	}
 
 	if (!skipPrompts) {
-		const confirm = prompt("Continue? (y/N):");
-		if (confirm?.toLowerCase() !== "y") {
+		const answer = prompt("Continue? (y/N):");
+		if (answer?.toLowerCase() !== "y") {
 			console.log("Release cancelled.");
 			Deno.exit(0);
 		}
 	}
 
-	// Update version in deno.json
+	// ----- Mutations -----
+
 	console.log(`Bumping ${versionType} version...`);
-	denoJson.version = newVersion;
-	await Deno.writeTextFile("deno.json", JSON.stringify(denoJson, null, 2) + "\n");
+	manifest.version = newVersion;
+	const indent = detectIndent(manifestText);
+	const trailingNewline = manifestText.endsWith("\n") ? "\n" : "";
+	const serialized = JSON.stringify(manifest, null, indent) + trailingNewline;
+	await Deno.writeTextFile(manifestPath, serialized);
 
-	// Commit the version change
-	const commitMessage = customMessage
-		? `Release: ${newVersion} (${customMessage})`
-		: `Release: ${newVersion}`;
+	try {
+		await runOrThrow(["git", "add", manifestPath]);
+		await runOrThrow(["git", "commit", "-m", commitMessage]);
+		await runOrThrow(["git", "tag", "-a", tagName, "-m", commitMessage]);
 
-	await runOrExit(["git", "add", "deno.json"]);
-	await runOrExit(["git", "commit", "-m", commitMessage]);
-	await runOrExit(["git", "tag", "-a", `v${newVersion}`, "-m", commitMessage]);
+		console.log(`Version bumped to: ${green(tagName)}`);
 
-	console.log(`Version bumped to: ${green(`v${newVersion}`)}`);
+		console.log("Pushing to remote...");
+		await runOrThrow(["git", "push"]);
+		await runOrThrow(["git", "push", "origin", `refs/tags/${tagName}`]);
+	} catch (e) {
+		console.error(red(`Error: ${(e as Error).message}`));
+		console.error();
+		console.error(
+			yellow(
+				"You may be in a partially-released state. To inspect / roll back, consider:",
+			),
+		);
+		console.error(`  git tag -d ${tagName}     # remove local tag if created`);
+		console.error(`  git reset --hard HEAD~1   # undo local commit if created`);
+		console.error(`  (no-op on ${manifestPath} if it was not yet committed)`);
+		Deno.exit(1);
+	}
 
-	// Push everything including tags
-	console.log("Pushing to remote...");
-	await runOrExit(["git", "push"]);
-	await runOrExit(["git", "push", "--tags"]);
-
-	console.log(green(`Release complete! New version: v${newVersion}`));
+	console.log(green(`Release complete! New version: ${tagName}`));
 }
 
-main();
+if (import.meta.main) {
+	main();
+}

@@ -6,7 +6,7 @@
 - **Runtime**: Deno
 - **Registry**: JSR (jsr:@marianmeres/deno-release)
 - **Entry point**: `deno-release.ts`
-- **Purpose**: Automate semantic version releases for Deno projects
+- **Purpose**: Automate semantic version releases for Deno / JSR projects
 
 ## Package Structure
 
@@ -15,7 +15,8 @@
 ├── deno.json          # Package manifest with version, exports, formatting config
 ├── deno-release.ts    # Main executable script (shebang: #!/usr/bin/env -S deno run -A)
 ├── README.md          # User documentation
-└── AGENTS.md          # This file
+├── AGENTS.md          # This file
+└── mcp-include.txt    # MCP short description
 ```
 
 ## CLI Interface
@@ -23,22 +24,37 @@
 ### Invocation
 
 ```bash
-deno run -A jsr:@marianmeres/deno-release <version-type> [custom-message]
+deno run -A jsr:@marianmeres/deno-release [flags] [version-type] [custom-message...]
 ```
 
 ### Arguments
 
 | Position | Name           | Required | Values                       | Description                          |
 |----------|----------------|----------|------------------------------|--------------------------------------|
-| 1        | version-type   | Yes      | `major`, `minor`, `patch`    | Semantic version component to bump   |
+| 1        | version-type   | No       | `major`, `minor`, `patch`    | Semantic version component to bump (defaults to `patch`) |
 | 2+       | custom-message | No       | Any string (space-separated) | Appended to commit/tag message       |
+
+If the first positional argument is not a valid version type, it is treated as
+part of the commit message and the bump defaults to `patch`. A warning is
+printed when the argument looks like a likely typo of a version type
+(e.g. `minro`, `pacth`).
+
+### Flags
+
+| Flag              | Alias | Effect                                             |
+|-------------------|-------|----------------------------------------------------|
+| `--yes`           | `-y`  | Skip all confirmation prompts (non-interactive).   |
+| `--dry-run`       | `-n`  | Preview all actions; make no mutations.            |
+| `--verbose`       | `-v`  | Log every git command before it runs.              |
+
+Flags can appear anywhere in the argument list.
 
 ### Exit Codes
 
 | Code | Meaning                                      |
 |------|----------------------------------------------|
 | 0    | Success or user cancelled                    |
-| 1    | Error (invalid args, dirty git, missing files) |
+| 1    | Error (invalid args, dirty git, missing files, pre-flight failure, command failure) |
 
 ## Exported API
 
@@ -57,27 +73,51 @@ export function bumpVersion(current: string, type: VersionType): string;
 - **Input**: Semver string (e.g., "1.2.3") and bump type
 - **Output**: New version string
 - **Behavior**: Increments specified component, resets lower components to 0
-- **Side effects**: Calls `Deno.exit(1)` on invalid version format
+- **Errors**: Throws `Error` on invalid version format or invalid bump type.
+  Never calls `Deno.exit` from library paths.
+
+### Module side effects
+
+Importing the module does **not** execute the CLI. The `main()` function is
+guarded with `if (import.meta.main)` so library consumers can import
+`bumpVersion` without triggering CLI behaviour.
+
+## Manifest Resolution
+
+On startup the tool searches the current working directory for a manifest in
+this order:
+
+1. `deno.json`
+2. `jsr.json`
+
+The first one found is used. If both exist, `deno.json` wins.
 
 ## Execution Flow
 
-1. **Parse arguments**: Extract version type and optional message from `Deno.args`
-2. **Validate version type**: Must be "major", "minor", or "patch"
-3. **Check git repository**: Verify `.git` directory exists
-4. **Check deno.json**: Verify file exists
-5. **Check git status**: Fail if uncommitted changes exist (uses `git status --porcelain`)
-6. **Check branch**: Warn if not on `main` or `master`, prompt to continue
-7. **Read current version**: Parse `version` field from `deno.json`
-8. **Calculate new version**: Apply bump logic
-9. **Confirm with user**: Show preview, require "y" to proceed
-10. **Update deno.json**: Write new version with 2-space indentation + trailing newline
-11. **Git operations**:
-    - `git add deno.json`
+1. **Parse arguments**: Extract flags, version type, and optional message
+   from `Deno.args`. Unknown first-positional values warn on likely typos and
+   fall through to "default patch + message" behaviour.
+2. **Check git repository**: `git rev-parse --is-inside-work-tree`
+3. **Locate manifest**: First of `deno.json` / `jsr.json` that exists
+4. **Check git status**: Fail on uncommitted changes (warn-only in `--dry-run`)
+5. **Check branch**: Warn if not on `main` or `master`, prompt to continue
+6. **Read current version**: Parse `version` field from the manifest
+7. **Calculate new version**: Apply bump logic via `bumpVersion`
+8. **Pre-flight checks (read-only; fail fast)**:
+    - Target tag `vX.Y.Z` must not already exist locally
+    - `origin` remote must be configured
+9. **Confirm with user**: Show preview, require "y" to proceed (skipped on
+   `--yes`; `--dry-run` exits here without mutating).
+10. **Update manifest**: Rewrite the file with the new version, preserving
+    the original indentation (detected from the source) and trailing newline.
+11. **Git operations** (wrapped in try/catch; on failure a rollback hint
+    is printed):
+    - `git add <manifest>`
     - `git commit -m "Release: X.Y.Z [(custom message)]"`
     - `git tag -a vX.Y.Z -m "Release: X.Y.Z [(custom message)]"`
 12. **Push to remote**:
     - `git push`
-    - `git push --tags`
+    - `git push origin refs/tags/vX.Y.Z`  (only the new tag, not all tags)
 
 ## Dependencies
 
@@ -85,27 +125,28 @@ export function bumpVersion(current: string, type: VersionType): string;
 - **Deno APIs used**:
   - `Deno.args` - CLI arguments
   - `Deno.Command` - Shell command execution
-  - `Deno.stat` - File/directory existence check
-  - `Deno.readTextFile` - Read deno.json
-  - `Deno.writeTextFile` - Write deno.json
-  - `Deno.exit` - Process termination
+  - `Deno.stat` - File existence check
+  - `Deno.readTextFile` - Read manifest
+  - `Deno.writeTextFile` - Write manifest
+  - `Deno.exit` - Process termination (CLI top level only)
   - `prompt` - User input (built-in)
 
 ## Requirements for Target Projects
 
-- Must have `deno.json` in working directory
-- `deno.json` must contain `"version"` field with valid semver (X.Y.Z)
-- Must be inside a git repository (`.git` directory)
-- Working tree must be clean (no uncommitted changes)
-- Git remote must be configured for push
+- Must have `deno.json` or `jsr.json` in working directory
+- The manifest must contain a `version` field with valid semver (`X.Y.Z`)
+- Must be inside a git repository
+- `origin` remote must be configured
+- Working tree must be clean (unless using `--dry-run`)
 
 ## Output Format
 
 - Uses ANSI escape codes for colored terminal output:
-  - Red (`\x1b[31m`): Errors
-  - Green (`\x1b[32m`): Success messages, new version
-  - Yellow (`\x1b[33m`): Warnings
-  - Bold (`\x1b[1m`): Emphasis
+    - Red (`\x1b[31m`): Errors
+    - Green (`\x1b[32m`): Success messages, new version
+    - Yellow (`\x1b[33m`): Warnings, dry-run notices, rollback hints
+    - Bold (`\x1b[1m`): Emphasis
+    - Dim (`\x1b[2m`): Verbose command traces
 
 ## Commit/Tag Message Format
 
@@ -113,9 +154,30 @@ export function bumpVersion(current: string, type: VersionType): string;
 - With custom message: `Release: X.Y.Z (custom message here)`
 - Tag name format: `vX.Y.Z` (prefixed with "v")
 
+## Manifest Rewrite Semantics
+
+- The `version` field is replaced; all other keys keep their original order
+  and values.
+- Indentation is preserved: detected from the first indented line of the
+  original file (tabs or spaces), defaulting to 2 spaces.
+- A trailing newline is preserved if the original file had one.
+
+## Rollback Behaviour
+
+If any mutation step fails (commit, tag, push), the tool exits with code 1
+and prints guidance:
+
+```
+git tag -d vX.Y.Z         # remove local tag if created
+git reset --hard HEAD~1   # undo local commit if created
+```
+
+The rollback is not performed automatically — the user decides based on how
+far the release progressed.
+
 ## Configuration
 
-- **Formatting** (in deno.json):
+- **Formatting** (in this repo's `deno.json`):
   - Uses tabs for indentation
   - Line width: 90 characters
   - Indent width: 4
@@ -123,9 +185,26 @@ export function bumpVersion(current: string, type: VersionType): string;
 
 ## Limitations
 
-- Only supports standard semver (X.Y.Z), no pre-release or build metadata
+- Only supports standard semver (`X.Y.Z`), no pre-release or build metadata
 - Only checks for `main` or `master` branch names
-- Writes deno.json with 2-space indentation (not configurable)
-- No dry-run mode
-- No support for monorepos or workspaces
+- No support for monorepos or Deno workspaces (picks a single manifest at cwd)
 - No changelog generation
+- `jsr.jsonc` / `deno.jsonc` (with comments) are **not** supported —
+  `JSON.parse` is used, not a JSONC parser
+- No automatic rollback on mid-release failure (prints guidance only)
+- Windows shebang support depends on the host (POSIX `env -S`)
+
+## Notable Behaviour Changes from 1.3.x
+
+- `bumpVersion` / `parseVersion` throw on invalid input instead of
+  `Deno.exit(1)`.
+- `main()` is guarded by `import.meta.main`, so importing the module no
+  longer runs the CLI.
+- Only the newly created tag is pushed (`git push origin refs/tags/vX.Y.Z`),
+  not all local tags.
+- Manifest indentation is preserved on write.
+- Pre-flight checks reject the release before any mutation if the tag
+  already exists or if `origin` is missing.
+- Typo-like first arguments trigger a warning.
+- `jsr.json` is accepted as a manifest.
+- New flags: `--dry-run` / `-n`, `--verbose` / `-v`.

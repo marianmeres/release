@@ -1,1 +1,2 @@
-CLI tool to automate semantic version releases for Deno projects. Bumps version in deno.json, commits, tags, and pushes to git remote.
+CLI tool to automate semantic version releases for Deno projects. Bumps version in deno.json, 
+commits, tags, and pushes to git remote.
