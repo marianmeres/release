@@ -3,12 +3,16 @@
   "version": "1.4.0",
   "exports": "./deno-release.ts",
   "tasks": {
+    "test": "deno test -A",
     "release": "deno run -A deno-release.ts",
     "publish": "deno publish",
     "rp": "deno task release -y && deno publish",
     "rpm": "deno task release minor -y && deno publish"
   },
   "imports": {},
+  "publish": {
+    "exclude": ["tmp", "*.test.ts"]
+  },
   "fmt": {
     "useTabs": true,
     "lineWidth": 90,

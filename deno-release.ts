@@ -2,14 +2,18 @@
 
 /**
  * @module
- * Opinionated CLI tool for releasing Deno / JSR projects.
+ * Opinionated CLI tool for releasing Deno / JSR / npm projects.
  *
- * Bumps the version in `deno.json` (or `jsr.json`), creates an annotated git
- * tag, and pushes the commit together with the new tag to the remote
- * repository.
+ * Bumps the version in `deno.json` (or `jsr.json`, or `package.json`), creates
+ * an annotated git tag, and pushes the commit together with the new tag to the
+ * remote repository. When the manifest is a `package.json`, the root version in
+ * `package-lock.json` is kept in sync so `npm ci` does not break.
  *
  * Importing this module does not execute the CLI — library consumers can
  * safely import {@link bumpVersion} without side effects.
+ *
+ * The manifest is the first of `deno.json`, `jsr.json`, `package.json` that
+ * exists and carries a string `version` field.
  *
  * @example
  * ```bash
@@ -27,7 +31,13 @@ export type VersionType = "major" | "minor" | "patch";
 const VALID_VERSION_TYPES: VersionType[] = ["major", "minor", "patch"];
 
 /** Manifest file names searched, in order of preference. */
-const MANIFEST_CANDIDATES = ["deno.json", "jsr.json"] as const;
+const MANIFEST_CANDIDATES = ["deno.json", "jsr.json", "package.json"] as const;
+
+/** npm manifest name (the only manifest with a lockfile we keep in sync). */
+const NPM_MANIFEST = "package.json";
+
+/** npm lockfile, synced only when {@link NPM_MANIFEST} is the resolved manifest. */
+const NPM_LOCKFILE = "package-lock.json";
 
 // Colors for terminal output
 const red = (s: string): string => `\x1b[31m${s}\x1b[0m`;
@@ -154,6 +164,65 @@ function detectIndent(text: string): string {
 	return m ? m[1] : "  ";
 }
 
+/**
+ * Serialize `value` back to JSON, mirroring the source document's indentation
+ * (tabs or spaces) and trailing-newline convention.
+ */
+function serializeLike(originalText: string, value: unknown): string {
+	const indent = detectIndent(originalText);
+	const trailingNewline = originalText.endsWith("\n") ? "\n" : "";
+	return JSON.stringify(value, null, indent) + trailingNewline;
+}
+
+/**
+ * Rewrites the *root* package version inside an npm `package-lock.json`
+ * document, leaving every other field (and the file's formatting) untouched.
+ *
+ * npm stores the root version in up to two places, depending on
+ * `lockfileVersion`:
+ *
+ * - `version` — present in all lockfile versions
+ * - `packages[""].version` — lockfileVersion 2 and 3 only
+ *
+ * Only fields that already exist are updated; none are invented. If neither
+ * field is present the input is returned unchanged, which the caller can detect
+ * by identity comparison.
+ *
+ * @throws if `lockText` is not valid JSON.
+ *
+ * @example
+ * ```ts
+ * const patched = syncPackageLockVersion(await Deno.readTextFile("package-lock.json"), "1.2.4");
+ * ```
+ */
+export function syncPackageLockVersion(
+	lockText: string,
+	newVersion: string,
+): string {
+	const lock = JSON.parse(lockText) as Record<string, unknown>;
+	let found = false;
+
+	if (typeof lock.version === "string") {
+		lock.version = newVersion;
+		found = true;
+	}
+
+	// lockfileVersion 2/3 repeat the root version under packages[""]
+	const packages = lock.packages;
+	if (packages && typeof packages === "object" && !Array.isArray(packages)) {
+		const root = (packages as Record<string, unknown>)[""];
+		if (root && typeof root === "object" && !Array.isArray(root)) {
+			const rootPkg = root as Record<string, unknown>;
+			if (typeof rootPkg.version === "string") {
+				rootPkg.version = newVersion;
+				found = true;
+			}
+		}
+	}
+
+	return found ? serializeLike(lockText, lock) : lockText;
+}
+
 interface ParsedArgs {
 	versionType: VersionType;
 	customMessage: string;
@@ -201,12 +270,62 @@ function parseArgs(argv: string[]): ParsedArgs {
 	return { versionType, customMessage, skipPrompts, dryRun, verbose };
 }
 
-/** Locate the first available manifest file. Returns `null` if none found. */
-async function findManifest(): Promise<string | null> {
+/** A manifest file that exists, parses, and carries a string `version`. */
+interface ResolvedManifest {
+	path: string;
+	text: string;
+	data: Record<string, unknown>;
+	version: string;
+	/** Every candidate present in the cwd, in preference order. */
+	candidates: string[];
+}
+
+/**
+ * Locates the manifest to bump: the first existing candidate that carries a
+ * string `version` field. Skipping version-less candidates matters for repos
+ * that keep a `deno.json` purely for tasks / imports next to a versioned
+ * `package.json`.
+ *
+ * Exits the process (CLI-only path) when nothing usable is found or when a
+ * candidate exists but is not valid JSON.
+ */
+async function resolveManifest(): Promise<ResolvedManifest> {
+	const candidates: string[] = [];
 	for (const name of MANIFEST_CANDIDATES) {
-		if (await fileExists(name)) return name;
+		if (await fileExists(name)) candidates.push(name);
 	}
-	return null;
+
+	if (!candidates.length) {
+		console.error(
+			red(
+				`Error: No manifest found (looked for ${MANIFEST_CANDIDATES.join(", ")})`,
+			),
+		);
+		Deno.exit(1);
+	}
+
+	for (const path of candidates) {
+		const text = await Deno.readTextFile(path);
+		let data: Record<string, unknown>;
+		try {
+			data = JSON.parse(text);
+		} catch (e) {
+			console.error(
+				red(`Error: Failed to parse ${path}: ${(e as Error).message}`),
+			);
+			Deno.exit(1);
+		}
+		const version = data.version;
+		if (typeof version !== "string") continue;
+		return { path, text, data, version, candidates };
+	}
+
+	console.error(
+		red(
+			`Error: No string 'version' field found in ${candidates.join(" / ")}`,
+		),
+	);
+	Deno.exit(1);
 }
 
 /**
@@ -217,9 +336,11 @@ async function findManifest(): Promise<string | null> {
  * 2. Validates git repository + manifest existence
  * 3. Checks for uncommitted changes
  * 4. Warns if not on main/master branch
- * 5. Pre-flight: tag must not already exist and `origin` must be configured
+ * 5. Pre-flight: tag must not already exist, `origin` must be configured, and
+ *    `package-lock.json` (npm projects only) must be parseable
  * 6. Shows preview and asks for confirmation (unless `--yes` / `--dry-run`)
- * 7. Updates version in the manifest (preserving original indentation)
+ * 7. Updates version in the manifest (preserving original indentation), and
+ *    syncs `package-lock.json` when the manifest is a `package.json`
  * 8. Creates commit and annotated tag
  * 9. Pushes the commit and the new tag to `origin`
  */
@@ -240,16 +361,14 @@ async function main(): Promise<void> {
 		Deno.exit(1);
 	}
 
-	// Locate manifest
-	const manifestPath = await findManifest();
-	if (!manifestPath) {
-		console.error(
-			red(
-				`Error: No manifest found (looked for ${MANIFEST_CANDIDATES.join(", ")})`,
-			),
-		);
-		Deno.exit(1);
-	}
+	// Locate & parse manifest
+	const {
+		path: manifestPath,
+		text: manifestText,
+		data: manifest,
+		version: currentVersion,
+		candidates,
+	} = await resolveManifest();
 
 	// Check for uncommitted changes — allowed in dry-run so preview still works
 	const { stdout: status } = await run(["git", "status", "--porcelain"]);
@@ -293,25 +412,13 @@ async function main(): Promise<void> {
 		}
 	}
 
-	// Read & parse manifest
-	const manifestText = await Deno.readTextFile(manifestPath);
-	let manifest: Record<string, unknown>;
-	try {
-		manifest = JSON.parse(manifestText);
-	} catch (e) {
-		console.error(
-			red(`Error: Failed to parse ${manifestPath}: ${(e as Error).message}`),
-		);
-		Deno.exit(1);
-	}
-	const currentVersion = manifest.version;
-	if (typeof currentVersion !== "string") {
-		console.error(
-			red(`Error: No string 'version' field found in ${manifestPath}`),
-		);
-		Deno.exit(1);
-	}
 	console.log(`Manifest:        ${manifestPath}`);
+	const others = candidates.filter((c) => c !== manifestPath);
+	if (others.length) {
+		console.log(
+			yellow(`                 (also present, not updated: ${others.join(", ")})`),
+		);
+	}
 	console.log(`Current version: ${currentVersion}`);
 
 	// Compute new version (may throw on malformed current)
@@ -352,6 +459,41 @@ async function main(): Promise<void> {
 		Deno.exit(1);
 	}
 
+	// npm lockfile must be parseable *before* we touch anything — `npm ci`
+	// refuses to run when the lockfile disagrees with package.json, so bumping
+	// the manifest alone would break CI for the repo we just released.
+	let lockPath: string | null = null;
+	let lockText = "";
+	if (manifestPath === NPM_MANIFEST && await fileExists(NPM_LOCKFILE)) {
+		// `git add` fails on ignored paths — catch that here rather than mid-release
+		const { code: isIgnored } = await run([
+			"git",
+			"check-ignore",
+			"-q",
+			NPM_LOCKFILE,
+		]);
+		if (isIgnored === 0) {
+			console.log(
+				yellow(
+					`Warning: ${NPM_LOCKFILE} is git-ignored — leaving it untouched.`,
+				),
+			);
+		} else {
+			lockText = await Deno.readTextFile(NPM_LOCKFILE);
+			try {
+				JSON.parse(lockText);
+			} catch (e) {
+				console.error(
+					red(`Error: Failed to parse ${NPM_LOCKFILE}: ${
+						(e as Error).message
+					}`),
+				);
+				Deno.exit(1);
+			}
+			lockPath = NPM_LOCKFILE;
+		}
+	}
+
 	// Build messages
 	const commitMessage = customMessage
 		? `Release: ${newVersion} (${customMessage})`
@@ -365,6 +507,9 @@ async function main(): Promise<void> {
 			green(newVersion)
 		} in ${manifestPath}`,
 	);
+	if (lockPath) {
+		console.log(`  - Sync the root version in ${lockPath}`);
+	}
 	console.log(`  - Create a git commit: '${commitMessage}'`);
 	console.log(`  - Create an annotated git tag: '${tagName}'`);
 	console.log(`  - Push the commit and the '${tagName}' tag to 'origin'`);
@@ -387,13 +532,22 @@ async function main(): Promise<void> {
 
 	console.log(`Bumping ${versionType} version...`);
 	manifest.version = newVersion;
-	const indent = detectIndent(manifestText);
-	const trailingNewline = manifestText.endsWith("\n") ? "\n" : "";
-	const serialized = JSON.stringify(manifest, null, indent) + trailingNewline;
-	await Deno.writeTextFile(manifestPath, serialized);
+	await Deno.writeTextFile(manifestPath, serializeLike(manifestText, manifest));
+
+	if (lockPath) {
+		const patched = syncPackageLockVersion(lockText, newVersion);
+		if (patched === lockText) {
+			console.log(
+				yellow(`Warning: no root 'version' field in ${lockPath} — left as is.`),
+			);
+		} else {
+			await Deno.writeTextFile(lockPath, patched);
+		}
+	}
 
 	try {
 		await runOrThrow(["git", "add", manifestPath]);
+		if (lockPath) await runOrThrow(["git", "add", lockPath]);
 		await runOrThrow(["git", "commit", "-m", commitMessage]);
 		await runOrThrow(["git", "tag", "-a", tagName, "-m", commitMessage]);
 
@@ -412,7 +566,11 @@ async function main(): Promise<void> {
 		);
 		console.error(`  git tag -d ${tagName}     # remove local tag if created`);
 		console.error(`  git reset --hard HEAD~1   # undo local commit if created`);
-		console.error(`  (no-op on ${manifestPath} if it was not yet committed)`);
+		console.error(
+			`  git checkout -- ${manifestPath}${
+				lockPath ? ` ${lockPath}` : ""
+			}   # discard the version bump if it was not yet committed`,
+		);
 		Deno.exit(1);
 	}
 
