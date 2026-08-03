@@ -143,23 +143,23 @@ disagrees with `package.json`.
    that exists and has a string `version` (read + parsed here)
 4. **Check git status**: Fail on uncommitted changes (warn-only in `--dry-run`)
 5. **Check branch**: Warn if not on `main` or `master`, prompt to continue
-7. **Calculate new version**: Apply bump logic via `bumpVersion`
-8. **Pre-flight checks (read-only; fail fast)**:
+6. **Calculate new version**: Apply bump logic via `bumpVersion`
+7. **Pre-flight checks (read-only; fail fast)**:
     - Target tag `vX.Y.Z` must not already exist locally
     - `origin` remote must be configured
     - `package-lock.json` (npm manifests only) must be parseable and not
       git-ignored
-9. **Confirm with user**: Show preview, require "y" to proceed (skipped on
+8. **Confirm with user**: Show preview, require "y" to proceed (skipped on
    `--yes`; `--dry-run` exits here without mutating).
-10. **Update manifest**: Rewrite the file with the new version, preserving
+9. **Update manifest**: Rewrite the file with the new version, preserving
     the original indentation (detected from the source) and trailing newline.
     On npm manifests, `package-lock.json` is patched the same way.
-11. **Git operations** (wrapped in try/catch; on failure a rollback hint
+10. **Git operations** (wrapped in try/catch; on failure a rollback hint
     is printed):
     - `git add <manifest>` (plus `package-lock.json` when synced)
     - `git commit -m "Release: X.Y.Z [(custom message)]"`
     - `git tag -a vX.Y.Z -m "Release: X.Y.Z [(custom message)]"`
-12. **Push to remote**:
+11. **Push to remote**:
     - `git push`
     - `git push origin refs/tags/vX.Y.Z`  (only the new tag, not all tags)
 

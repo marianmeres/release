@@ -2,6 +2,18 @@
 
 /**
  * @module
+ * > **⚠ This package has been renamed to
+ * > [`@marianmeres/release`](https://jsr.io/@marianmeres/release).**
+ * >
+ * > This is the final release under the `deno-release` name — the name became
+ * > inaccurate once the tool learned to release npm projects too. It is
+ * > feature-complete and will keep working, but all future development happens
+ * > under the new name. To migrate, change your task to:
+ * >
+ * > ```
+ * > deno run -A jsr:@marianmeres/release
+ * > ```
+ *
  * Opinionated CLI tool for releasing Deno / JSR / npm projects.
  *
  * Bumps the version in `deno.json` (or `jsr.json`, or `package.json`), creates
@@ -345,6 +357,16 @@ async function resolveManifest(): Promise<ResolvedManifest> {
  * 9. Pushes the commit and the new tag to `origin`
  */
 async function main(): Promise<void> {
+	// This package is frozen; the maintained tool is @marianmeres/release.
+	// JSR archiving is completely silent (`is_archived` never reaches meta.json),
+	// so this line is the only channel that reaches existing callers.
+	console.error(
+		dim(
+			"Note: @marianmeres/deno-release has been renamed to @marianmeres/release.\n" +
+				"      Update this task to: deno run -A jsr:@marianmeres/release",
+		),
+	);
+
 	const { versionType, customMessage, skipPrompts, dryRun, verbose } = parseArgs(
 		Deno.args,
 	);

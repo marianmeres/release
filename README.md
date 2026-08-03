@@ -1,5 +1,18 @@
 # @marianmeres/deno-release
 
+> ## ⚠ Renamed to [`@marianmeres/release`](https://jsr.io/@marianmeres/release)
+>
+> This is the **final release under the `deno-release` name** — the name became
+> inaccurate once the tool learned to release npm projects too. This version is
+> feature-complete and will keep working indefinitely, but all future
+> development happens under the new name.
+>
+> To migrate, change your task to:
+>
+> ```bash
+> deno run -A jsr:@marianmeres/release
+> ```
+
 An opinionated, interactive CLI tool for releasing Deno / JSR / npm projects.
 Bumps the version in `deno.json` (or `jsr.json`, or `package.json`), creates an
 annotated git tag, and pushes the commit together with the new tag to the remote
