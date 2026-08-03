@@ -1,6 +1,6 @@
 {
   "name": "@marianmeres/release",
-  "version": "1.5.0",
+  "version": "2.0.0",
   "exports": "./release.ts",
   "tasks": {
     "test": "deno test -A",
@@ -11,7 +11,10 @@
   },
   "imports": {},
   "publish": {
-    "exclude": ["tmp", "*.test.ts"]
+    "exclude": [
+      "tmp",
+      "*.test.ts"
+    ]
   },
   "fmt": {
     "useTabs": true,
