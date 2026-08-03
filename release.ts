@@ -27,7 +27,7 @@
  * deno run -A jsr:@marianmeres/release --help
  * ```
  *
- * Renamed from `@marianmeres/deno-release`, which is frozen at 1.5.0.
+ * Renamed from `@marianmeres/deno-release` (archived).
  */
 
 /** Semantic version bump type. */

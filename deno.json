@@ -1,25 +1,25 @@
 {
-  "name": "@marianmeres/release",
-  "version": "2.0.0",
-  "exports": "./release.ts",
-  "tasks": {
-    "test": "deno test -A",
-    "release": "deno run -A release.ts",
-    "publish": "deno publish",
-    "rp": "deno task release -y && deno publish",
-    "rpm": "deno task release minor -y && deno publish"
-  },
-  "imports": {},
-  "publish": {
-    "exclude": [
-      "tmp",
-      "*.test.ts"
-    ]
-  },
-  "fmt": {
-    "useTabs": true,
-    "lineWidth": 90,
-    "indentWidth": 4,
-    "proseWrap": "preserve"
-  }
+	"name": "@marianmeres/release",
+	"version": "2.0.0",
+	"exports": "./release.ts",
+	"tasks": {
+		"test": "deno test -A",
+		"release": "deno run -A release.ts",
+		"publish": "deno publish",
+		"rp": "deno task release -y && deno publish",
+		"rpm": "deno task release minor -y && deno publish"
+	},
+	"imports": {},
+	"publish": {
+		"exclude": [
+			"tmp",
+			"*.test.ts"
+		]
+	},
+	"fmt": {
+		"useTabs": true,
+		"lineWidth": 90,
+		"indentWidth": 4,
+		"proseWrap": "preserve"
+	}
 }

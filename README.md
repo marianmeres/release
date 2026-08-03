@@ -5,9 +5,8 @@ Bumps the version in `deno.json` (or `jsr.json`, or `package.json`), creates an
 annotated git tag, and pushes the commit together with the new tag to the remote
 repository.
 
-> Renamed from `@marianmeres/deno-release`, which is frozen at 1.5.0 — the old
-> name became inaccurate once the tool learned to release npm projects too.
-> Migrating is a one-line change; see [Migrating from `deno-release`](#migrating-from-deno-release).
+> Renamed from `@marianmeres/deno-release` once the tool learned to release npm
+> projects too. Migrating is a one-line change; see [Legacy](#legacy).
 
 ## Features
 
@@ -229,65 +228,32 @@ const patched = syncPackageLockVersion(lockFileText, "1.2.4");
 If any of the mutation steps (steps 6-9) fail, the tool prints clear
 instructions for rolling back the local state.
 
-## Migrating from `deno-release`
+## Legacy
 
-Change the specifier — nothing else:
+Everything before 2.0.0 is archived and receives no further releases: the JSR
+package `@marianmeres/deno-release` (frozen at 1.5.0) and, before that, an npm
+CLI that also happened to be called `@marianmeres/release`. Neither is related
+to this package beyond lineage.
+
+Migrating off `deno-release` is a one-line change:
 
 ```diff
 -"release": "deno run -A jsr:@marianmeres/deno-release"
 +"release": "deno run -A jsr:@marianmeres/release"
 ```
 
-`@marianmeres/deno-release@1.5.0` stays published and keeps working, so there is
-no deadline. It is archived and will receive no further releases.
+Old invocations that 2.0.0 will now reject rather than misinterpret:
 
-Two things to check while migrating:
+- **Unknown options** are errors instead of becoming commit-message text, so a
+  mistyped flag no longer releases silently. Use `--` to pass through message
+  text starting with a dash.
+- **`-v`** is not accepted — use `--verbose`.
+- **An exact first argument is the version**, not the commit message.
+- **`-d` (multi-directory) and `--suffix`** are gone. Release packages
+  individually, and use an exact prerelease version instead of a suffix.
 
-- **`-v` changed meaning.** It is no longer accepted at all. In
-  `@marianmeres/release` 1.x (the old npm CLI) it meant _version_; here it meant
-  _verbose_. It now errors with a hint instead of doing the wrong thing.
-- **Changing the specifier rewrites `deno.lock`.** The next invocation updates
-  the lockfile before the tool runs, and the clean-tree check will then refuse
-  to release. Commit `deno.json` and `deno.lock` together.
-
-## Changes in 2.0.0 (breaking)
-
-- **Renamed** from `@marianmeres/deno-release`.
-- **Unknown options are rejected.** Previously any unrecognized token became
-  part of the commit message, so `--help` prepared a real release with the
-  message `(--help)` and a mistyped flag released silently. Retired 1.x flags
-  (`-v`, `-d`, `--suffix`, `--git-tag-prefix`) name their replacement. Use `--`
-  to pass through message text that starts with a dash.
-- **`-v` no longer means `--verbose`** — it is not accepted. Use `--verbose`.
-- **An exact version is accepted as the first argument.** Previously
-  `release 1.2.3` did a _patch_ bump with `1.2.3` as the commit message.
-- **Prerelease versions are accepted** and promoted correctly by later bumps.
-  `bumpVersion` no longer throws on a prerelease input.
-- **New:** `--help` / `-h`, `--tag-prefix <s>`, `--no-push`, `--`.
-- Dropped from the old npm CLI: multi-directory mode (`-d`) and `--suffix`.
-  Release packages individually; use an exact prerelease version instead of a
-  suffix.
-
-## Changes in 1.5.x
-
-- **`package.json` is now accepted as a manifest**, searched after
-  `deno.json` and `jsr.json`.
-- **Manifest resolution skips candidates without a string `version`.**
-- **`package-lock.json` is rewritten** on `package.json` releases and included
-  in the release commit.
-
-## Changes from 1.3.x
-
-- **`bumpVersion` / `parseVersion` throw on invalid input** instead of
-  calling `Deno.exit(1)`.
-- **The module no longer runs the CLI on import** — it uses `import.meta.main`.
-- **Tag push is scoped to the new tag only** (`git push origin
-  refs/tags/vX.Y.Z`) instead of `git push --tags`.
-- **Manifest indentation is preserved.**
-- **Pre-flight checks** reject a release up-front if the target tag already
-  exists locally or if no `origin` remote is configured.
-- **Version-type typos** (e.g. `minro`, `pacth`) emit a warning.
-- `jsr.json` is accepted as an alternative to `deno.json`.
+Note that changing the specifier rewrites `deno.lock`, which then trips the
+clean-tree check — commit `deno.json` and `deno.lock` together first.
 
 ## License
 

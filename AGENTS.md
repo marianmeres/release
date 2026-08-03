@@ -6,7 +6,7 @@
 - **Runtime**: Deno
 - **Registry**: JSR (jsr:@marianmeres/release)
 - **Entry point**: `release.ts`
-- **Renamed from**: `@marianmeres/deno-release`, frozen at 1.5.0 and archived
+- **Renamed from**: `@marianmeres/deno-release` (archived)
 - **Purpose**: Automate semantic version releases for Deno / JSR / npm projects
 
 ## Package Structure
@@ -46,15 +46,15 @@ An exact version equal to the manifest's current version is rejected.
 
 ### Flags
 
-| Flag               | Alias | Effect                                                                                              |
-| ------------------ | ----- | --------------------------------------------------------------------------------------------------- |
-| `--yes`            | `-y`  | Skip all confirmation prompts (non-interactive).                                                    |
-| `--dry-run`        | `-n`  | Preview all actions; make no mutations.                                                             |
-| `--verbose`        |       | Log every git command before it runs. **No `-v` alias** — it meant _version_ in the legacy npm CLI. |
-| `--help`           | `-h`  | Print usage and exit 0 without touching anything.                                                   |
-| `--tag-prefix <s>` |       | Git tag prefix; default `"v"`, `""` for none. Also accepts `--tag-prefix=<s>`.                      |
-| `--no-push`        |       | Create the commit and tag but do not push. Also skips the `origin` pre-flight.                      |
-| `--`               |       | Treat every remaining argument as message text.                                                     |
+| Flag               | Alias | Effect                                                                             |
+| ------------------ | ----- | ---------------------------------------------------------------------------------- |
+| `--yes`            | `-y`  | Skip all confirmation prompts (non-interactive).                                   |
+| `--dry-run`        | `-n`  | Preview all actions; make no mutations.                                            |
+| `--verbose`        |       | Log every git command before it runs. **No `-v` alias** — it is rejected outright. |
+| `--help`           | `-h`  | Print usage and exit 0 without touching anything.                                  |
+| `--tag-prefix <s>` |       | Git tag prefix; default `"v"`, `""` for none. Also accepts `--tag-prefix=<s>`.     |
+| `--no-push`        |       | Create the commit and tag but do not push. Also skips the `origin` pre-flight.     |
+| `--`               |       | Treat every remaining argument as message text.                                    |
 
 Flags can appear anywhere in the argument list.
 
@@ -318,8 +318,8 @@ deno task test    # deno test -A
 
 ## Notable Behaviour Changes in 2.0.0
 
-- Package renamed from `@marianmeres/deno-release` (frozen at 1.5.0, archived
-  on JSR). Entry point renamed `deno-release.ts` -> `release.ts`.
+- Package renamed from `@marianmeres/deno-release` (archived); entry point
+  renamed `deno-release.ts` -> `release.ts`.
 - **Unknown `-` options are rejected** instead of becoming commit-message text.
 - `-v` is no longer an alias for `--verbose` and is not accepted at all.
 - An exact version (`X.Y.Z` or `X.Y.Z-prerelease`) is accepted as the first
@@ -328,5 +328,5 @@ deno task test    # deno test -A
   `patch` -> `1.2.3`) instead of throwing.
 - New flags: `--help` / `-h`, `--tag-prefix <s>`, `--no-push`, and `--`.
 - New export: `VersionSpec`.
-- Dropped (never present here, present in the legacy npm CLI): multi-directory
+- Dropped (never present here, only in the archived npm CLI): multi-directory
   mode `-d`, and `--suffix`.
