@@ -1,4 +1,4 @@
-import { bumpVersion, syncPackageLockVersion } from "./deno-release.ts";
+import { bumpVersion, syncPackageLockVersion } from "./release.ts";
 
 // Kept dependency-free on purpose (see AGENTS.md: zero dependencies).
 function assertEquals(actual: unknown, expected: unknown, msg?: string): void {
@@ -24,8 +24,20 @@ Deno.test("bumpVersion", () => {
 	assertEquals(bumpVersion("1.2.3", "major"), "2.0.0");
 	assertEquals(bumpVersion("0.0.0", "patch"), "0.0.1");
 	assertThrows(() => bumpVersion("not-semver", "patch"));
-	assertThrows(() => bumpVersion("1.0.0-beta.1", "patch"));
 	assertThrows(() => bumpVersion("1.2", "patch"));
+	assertThrows(() => bumpVersion("1.2.3+build", "patch"));
+});
+
+Deno.test("bumpVersion: a prerelease promotes to the release it precedes", () => {
+	// matches `npm version` / semver.inc — without this, releasing an explicit
+	// prerelease would leave the manifest in a state no keyword bump could move
+	assertEquals(bumpVersion("1.2.3-rc.1", "patch"), "1.2.3");
+	assertEquals(bumpVersion("1.2.3-rc.1", "minor"), "1.3.0");
+	assertEquals(bumpVersion("1.2.3-rc.1", "major"), "2.0.0");
+	// already at a .0 boundary -> the prerelease is simply dropped
+	assertEquals(bumpVersion("1.2.0-rc.1", "minor"), "1.2.0");
+	assertEquals(bumpVersion("1.0.0-rc.1", "major"), "1.0.0");
+	assertEquals(bumpVersion("1.0.0-rc.1", "patch"), "1.0.0");
 });
 
 Deno.test("syncPackageLockVersion: lockfileVersion 3 updates both fields", () => {

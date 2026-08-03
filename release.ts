@@ -2,18 +2,6 @@
 
 /**
  * @module
- * > **⚠ This package has been renamed to
- * > [`@marianmeres/release`](https://jsr.io/@marianmeres/release).**
- * >
- * > This is the final release under the `deno-release` name — the name became
- * > inaccurate once the tool learned to release npm projects too. It is
- * > feature-complete and will keep working, but all future development happens
- * > under the new name. To migrate, change your task to:
- * >
- * > ```
- * > deno run -A jsr:@marianmeres/release
- * > ```
- *
  * Opinionated CLI tool for releasing Deno / JSR / npm projects.
  *
  * Bumps the version in `deno.json` (or `jsr.json`, or `package.json`), creates
@@ -21,20 +9,25 @@
  * remote repository. When the manifest is a `package.json`, the root version in
  * `package-lock.json` is kept in sync so `npm ci` does not break.
  *
- * Importing this module does not execute the CLI — library consumers can
- * safely import {@link bumpVersion} without side effects.
- *
  * The manifest is the first of `deno.json`, `jsr.json`, `package.json` that
  * exists and carries a string `version` field.
  *
+ * This is a CLI first; the pure {@link bumpVersion} and
+ * {@link syncPackageLockVersion} helpers are exported for reuse. Importing the
+ * module does not execute the CLI.
+ *
  * @example
  * ```bash
- * deno run -A jsr:@marianmeres/deno-release              # defaults to patch
- * deno run -A jsr:@marianmeres/deno-release patch
- * deno run -A jsr:@marianmeres/deno-release minor "Added new feature"
- * deno run -A jsr:@marianmeres/deno-release --yes patch  # skip confirmations
- * deno run -A jsr:@marianmeres/deno-release --dry-run minor
+ * deno run -A jsr:@marianmeres/release                    # defaults to patch
+ * deno run -A jsr:@marianmeres/release patch
+ * deno run -A jsr:@marianmeres/release minor "Added new feature"
+ * deno run -A jsr:@marianmeres/release 1.2.3-rc.1         # exact version
+ * deno run -A jsr:@marianmeres/release --yes patch        # skip confirmations
+ * deno run -A jsr:@marianmeres/release --dry-run minor
+ * deno run -A jsr:@marianmeres/release --help
  * ```
+ *
+ * Renamed from `@marianmeres/deno-release`, which is frozen at 1.5.0.
  */
 
 /** Semantic version bump type. */
@@ -118,39 +111,81 @@ async function fileExists(path: string): Promise<boolean> {
 	}
 }
 
-const SEMVER_RE = /^(\d+)\.(\d+)\.(\d+)$/;
+/**
+ * `X.Y.Z` with an optional prerelease label (`1.2.3-rc.1`).
+ *
+ * Build metadata (`+sha`) is deliberately rejected: git tags and registries
+ * treat it inconsistently, and it has no ordering semantics worth honouring
+ * in a release tool.
+ */
+const SEMVER_RE = /^(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?$/;
+
+interface ParsedSemver {
+	major: number;
+	minor: number;
+	patch: number;
+	/** Prerelease label without the leading `-`, or `null` for a plain release. */
+	prerelease: string | null;
+}
 
 /**
- * Parses a semver string `X.Y.Z` into numeric components.
+ * Parses a semver string `X.Y.Z` or `X.Y.Z-prerelease`.
  * @throws on malformed input.
  */
-function parseVersion(version: string): [number, number, number] {
+function parseVersion(version: string): ParsedSemver {
 	const m = SEMVER_RE.exec(version);
 	if (!m) {
 		throw new Error(
 			`Invalid version format: ${
 				JSON.stringify(version)
-			} (expected "X.Y.Z" with non-negative integers)`,
+			} (expected "X.Y.Z" or "X.Y.Z-prerelease" with non-negative integers)`,
 		);
 	}
-	return [Number(m[1]), Number(m[2]), Number(m[3])];
+	return {
+		major: Number(m[1]),
+		minor: Number(m[2]),
+		patch: Number(m[3]),
+		prerelease: m[4] ?? null,
+	};
 }
 
 /**
  * Bumps a semantic version based on the specified type.
  *
- * @throws if `current` is not a valid `X.Y.Z` semver string or `type` is not
- *         one of `"major" | "minor" | "patch"`.
+ * A prerelease counts as the release it precedes, matching `npm version` /
+ * `semver.inc`: bumping `1.2.3-rc.1` by `patch` yields `1.2.3`, not `1.2.4`.
+ * Without this, a release made with an explicit prerelease version would leave
+ * the manifest in a state no keyword bump could move forward.
+ *
+ * @throws if `current` is not a valid semver string or `type` is not one of
+ *         `"major" | "minor" | "patch"`.
  *
  * @example
  * ```ts
- * bumpVersion("1.2.3", "patch"); // "1.2.4"
- * bumpVersion("1.2.3", "minor"); // "1.3.0"
- * bumpVersion("1.2.3", "major"); // "2.0.0"
+ * bumpVersion("1.2.3", "patch");      // "1.2.4"
+ * bumpVersion("1.2.3", "minor");      // "1.3.0"
+ * bumpVersion("1.2.3", "major");      // "2.0.0"
+ * bumpVersion("1.2.3-rc.1", "patch"); // "1.2.3"  (promotes the prerelease)
  * ```
  */
 export function bumpVersion(current: string, type: VersionType): string {
-	let [major, minor, patch] = parseVersion(current);
+	const parsed = parseVersion(current);
+	let { major, minor, patch } = parsed;
+	const { prerelease } = parsed;
+
+	if (prerelease) {
+		switch (type) {
+			case "patch":
+				return `${major}.${minor}.${patch}`;
+			case "minor":
+				return patch === 0 ? `${major}.${minor}.0` : `${major}.${minor + 1}.0`;
+			case "major":
+				return minor === 0 && patch === 0 ? `${major}.0.0` : `${major + 1}.0.0`;
+			default:
+				throw new Error(`Invalid bump type: ${JSON.stringify(type)}`);
+		}
+	}
+
 	switch (type) {
 		case "major":
 			major++;
@@ -235,12 +270,90 @@ export function syncPackageLockVersion(
 	return found ? serializeLike(lockText, lock) : lockText;
 }
 
+/**
+ * What version to release: either a keyword bump relative to the manifest's
+ * current version, or an exact version supplied by the caller.
+ */
+export type VersionSpec =
+	| { kind: "bump"; type: VersionType }
+	| { kind: "exact"; version: string };
+
 interface ParsedArgs {
-	versionType: VersionType;
+	spec: VersionSpec;
 	customMessage: string;
 	skipPrompts: boolean;
 	dryRun: boolean;
 	verbose: boolean;
+	help: boolean;
+	/** Prefix for the git tag; `""` means an unprefixed tag. */
+	tagPrefix: string;
+	/** Whether to push the commit and tag to `origin`. */
+	push: boolean;
+}
+
+const KNOWN_FLAGS = [
+	"--yes",
+	"--dry-run",
+	"--verbose",
+	"--help",
+	"--tag-prefix",
+	"--no-push",
+] as const;
+
+/**
+ * Flags that meant something in `@marianmeres/release` 1.x (the Node CLI this
+ * tool replaces) and would otherwise be silently swallowed into the commit
+ * message. `-v` is the dangerous one: it meant *version* there and *verbose*
+ * here, so `release -v 1.2.3` used to set 1.2.3 and would now patch-bump with
+ * "1.2.3" as the message.
+ */
+const RETIRED_FLAGS: Record<string, string> = {
+	"-v": 'pass the version as a positional argument instead (e.g. "1.2.3"), ' +
+		"or use --verbose for a command trace",
+	"-d": "multi-directory mode was dropped; release each package separately",
+	"--dir": "multi-directory mode was dropped; release each package separately",
+	"--suffix": 'pass an exact prerelease version instead (e.g. "1.2.3-beta.1")',
+	"--git-tag-prefix": "renamed to --tag-prefix",
+	"--git-tag-prefix-none": 'replaced by --tag-prefix ""',
+	"-m": "the commit message is a positional argument; use -- to be explicit",
+};
+
+/** Levenshtein distance, used only for did-you-mean hints. */
+function editDistance(a: string, b: string): number {
+	const rows = Array.from(
+		{ length: a.length + 1 },
+		(_, i) => [i, ...Array(b.length).fill(0)],
+	);
+	for (let j = 0; j <= b.length; j++) rows[0][j] = j;
+	for (let i = 1; i <= a.length; i++) {
+		for (let j = 1; j <= b.length; j++) {
+			rows[i][j] = Math.min(
+				rows[i - 1][j] + 1,
+				rows[i][j - 1] + 1,
+				rows[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1),
+			);
+		}
+	}
+	return rows[a.length][b.length];
+}
+
+/** Build the "unknown flag" error message, with a hint where we can offer one. */
+function unknownFlagError(flag: string): Error {
+	const retired = RETIRED_FLAGS[flag];
+	if (retired) {
+		return new Error(`Unknown option '${flag}' — ${retired}.`);
+	}
+	const near = KNOWN_FLAGS
+		.map((f) => [f, editDistance(flag, f)] as const)
+		.filter(([, d]) => d <= 3)
+		.sort((a, b) => a[1] - b[1])[0];
+	const hint = near
+		? `did you mean '${near[0]}'?`
+		: `valid options: ${KNOWN_FLAGS.join(", ")}, -y, -n, -h`;
+	return new Error(
+		`Unknown option '${flag}' — ${hint}\n` +
+			`       (use -- to pass it through as commit message text)`,
+	);
 }
 
 function looksLikeVersionType(arg: string): boolean {
@@ -248,27 +361,87 @@ function looksLikeVersionType(arg: string): boolean {
 	return /^(maj|mij|mjo|min|mni|pat|pth|pac|patc|majo|mino)/i.test(arg);
 }
 
+/** Usage text for `--help`. */
+function usage(): string {
+	return `Release a Deno / JSR / npm project: bump, commit, tag, push.
+
+Usage:
+  release [<major|minor|patch|X.Y.Z[-pre]>] [message...] [options]
+
+Arguments:
+  version   Bump keyword, or an exact version. Defaults to 'patch'.
+  message   Free text appended to the commit and tag message.
+
+Options:
+  -y, --yes           Skip confirmation prompts (for CI).
+  -n, --dry-run       Preview everything; change nothing.
+      --verbose       Log every git command before it runs.
+  -h, --help          Show this help.
+      --tag-prefix <s>  Git tag prefix (default "v"; "" for no prefix).
+      --no-push       Create the commit and tag, but do not push.
+  --                  Treat all remaining arguments as message text.
+
+Examples:
+  release patch
+  release minor "Added new feature"
+  release 1.2.3-rc.1 --yes
+  release --dry-run major
+  release patch --tag-prefix "" --no-push`;
+}
+
+/**
+ * Parses CLI arguments.
+ *
+ * Unlike 1.x, an unrecognized `-`-prefixed token is a hard error rather than
+ * silently becoming commit-message text.
+ *
+ * @throws on an unknown option or a missing option value.
+ */
 function parseArgs(argv: string[]): ParsedArgs {
 	const rest: string[] = [];
 	let skipPrompts = false;
 	let dryRun = false;
 	let verbose = false;
-	for (const a of argv) {
-		if (a === "--yes" || a === "-y") skipPrompts = true;
+	let help = false;
+	let tagPrefix = "v";
+	let push = true;
+
+	for (let i = 0; i < argv.length; i++) {
+		const a = argv[i];
+		if (a === "--") {
+			rest.push(...argv.slice(i + 1));
+			break;
+		} else if (a === "--yes" || a === "-y") skipPrompts = true;
 		else if (a === "--dry-run" || a === "-n") dryRun = true;
-		else if (a === "--verbose" || a === "-v") verbose = true;
-		else rest.push(a);
+		else if (a === "--verbose") verbose = true;
+		else if (a === "--help" || a === "-h") help = true;
+		else if (a === "--no-push") push = false;
+		else if (a === "--tag-prefix") {
+			if (i + 1 >= argv.length) {
+				throw new Error(
+					`Option '--tag-prefix' requires a value (use '' for no prefix).`,
+				);
+			}
+			tagPrefix = argv[++i];
+		} else if (a.startsWith("--tag-prefix=")) {
+			tagPrefix = a.slice("--tag-prefix=".length);
+		} else if (a.startsWith("-") && a !== "-") {
+			throw unknownFlagError(a);
+		} else rest.push(a);
 	}
 
 	const [firstArg, ...messageParts] = rest;
-	let versionType: VersionType;
+	let spec: VersionSpec;
 	let customMessage: string;
 
 	if (firstArg && VALID_VERSION_TYPES.includes(firstArg as VersionType)) {
-		versionType = firstArg as VersionType;
+		spec = { kind: "bump", type: firstArg as VersionType };
+		customMessage = messageParts.join(" ");
+	} else if (firstArg && SEMVER_RE.test(firstArg)) {
+		spec = { kind: "exact", version: firstArg };
 		customMessage = messageParts.join(" ");
 	} else {
-		versionType = "patch";
+		spec = { kind: "bump", type: "patch" };
 		customMessage = firstArg ? [firstArg, ...messageParts].join(" ") : "";
 		if (firstArg && looksLikeVersionType(firstArg)) {
 			console.warn(
@@ -279,7 +452,16 @@ function parseArgs(argv: string[]): ParsedArgs {
 			);
 		}
 	}
-	return { versionType, customMessage, skipPrompts, dryRun, verbose };
+	return {
+		spec,
+		customMessage,
+		skipPrompts,
+		dryRun,
+		verbose,
+		help,
+		tagPrefix,
+		push,
+	};
 }
 
 /** A manifest file that exists, parses, and carries a string `version`. */
@@ -344,7 +526,8 @@ async function resolveManifest(): Promise<ResolvedManifest> {
  * Main entry point for the release CLI.
  *
  * Performs the following steps:
- * 1. Parses CLI args (`--yes`, `--dry-run`, `--verbose`, version type, msg)
+ * 1. Parses CLI args (version spec, message, `--yes`, `--dry-run`, `--verbose`,
+ *    `--help`, `--tag-prefix`, `--no-push`); unknown options are rejected
  * 2. Validates git repository + manifest existence
  * 3. Checks for uncommitted changes
  * 4. Warns if not on main/master branch
@@ -357,20 +540,20 @@ async function resolveManifest(): Promise<ResolvedManifest> {
  * 9. Pushes the commit and the new tag to `origin`
  */
 async function main(): Promise<void> {
-	// This package is frozen; the maintained tool is @marianmeres/release.
-	// JSR archiving is completely silent (`is_archived` never reaches meta.json),
-	// so this line is the only channel that reaches existing callers.
-	console.error(
-		dim(
-			"Note: @marianmeres/deno-release has been renamed to @marianmeres/release.\n" +
-				"      Update this task to: deno run -A jsr:@marianmeres/release",
-		),
-	);
-
-	const { versionType, customMessage, skipPrompts, dryRun, verbose } = parseArgs(
-		Deno.args,
-	);
+	let args: ParsedArgs;
+	try {
+		args = parseArgs(Deno.args);
+	} catch (e) {
+		console.error(red(`Error: ${(e as Error).message}`));
+		Deno.exit(1);
+	}
+	const { spec, customMessage, skipPrompts, dryRun, verbose, tagPrefix, push } = args;
 	VERBOSE = verbose;
+
+	if (args.help) {
+		console.log(usage());
+		return;
+	}
 
 	// Check if we're in a git repository (works for submodules too)
 	const { code: gitCheck } = await run([
@@ -445,13 +628,23 @@ async function main(): Promise<void> {
 
 	// Compute new version (may throw on malformed current)
 	let newVersion: string;
-	try {
-		newVersion = bumpVersion(currentVersion, versionType);
-	} catch (e) {
-		console.error(red(`Error: ${(e as Error).message}`));
-		Deno.exit(1);
+	if (spec.kind === "exact") {
+		newVersion = spec.version;
+		if (newVersion === currentVersion) {
+			console.error(
+				red(`Error: ${newVersion} is already the current version.`),
+			);
+			Deno.exit(1);
+		}
+	} else {
+		try {
+			newVersion = bumpVersion(currentVersion, spec.type);
+		} catch (e) {
+			console.error(red(`Error: ${(e as Error).message}`));
+			Deno.exit(1);
+		}
 	}
-	const tagName = `v${newVersion}`;
+	const tagName = `${tagPrefix}${newVersion}`;
 
 	// ----- Pre-flight checks (all read-only; fail before any mutation) -----
 
@@ -469,16 +662,21 @@ async function main(): Promise<void> {
 	}
 
 	// An 'origin' remote must be configured (we push to it later)
-	const { code: remoteCode, stderr: remoteErr } = await run([
-		"git",
-		"remote",
-		"get-url",
-		"origin",
-	]);
-	if (remoteCode !== 0) {
-		console.error(red(`Error: No 'origin' remote configured.`));
-		if (remoteErr) console.error(remoteErr);
-		Deno.exit(1);
+	if (push) {
+		const { code: remoteCode, stderr: remoteErr } = await run([
+			"git",
+			"remote",
+			"get-url",
+			"origin",
+		]);
+		if (remoteCode !== 0) {
+			console.error(red(`Error: No 'origin' remote configured.`));
+			if (remoteErr) console.error(remoteErr);
+			console.error(
+				yellow("       (use --no-push to commit and tag without pushing)"),
+			);
+			Deno.exit(1);
+		}
 	}
 
 	// npm lockfile must be parseable *before* we touch anything — `npm ci`
@@ -525,16 +723,20 @@ async function main(): Promise<void> {
 	console.log();
 	console.log(dryRun ? "This WOULD (dry run):" : "This will:");
 	console.log(
-		`  - Bump ${bold(versionType)} version to ${
-			green(newVersion)
-		} in ${manifestPath}`,
+		`  - Set version to ${green(newVersion)} in ${manifestPath} ${
+			dim(spec.kind === "exact" ? "(exact)" : `(${bold(spec.type)} bump)`)
+		}`,
 	);
 	if (lockPath) {
 		console.log(`  - Sync the root version in ${lockPath}`);
 	}
 	console.log(`  - Create a git commit: '${commitMessage}'`);
 	console.log(`  - Create an annotated git tag: '${tagName}'`);
-	console.log(`  - Push the commit and the '${tagName}' tag to 'origin'`);
+	if (push) {
+		console.log(`  - Push the commit and the '${tagName}' tag to 'origin'`);
+	} else {
+		console.log(dim(`  - (not pushing — --no-push)`));
+	}
 	console.log();
 
 	if (dryRun) {
@@ -552,7 +754,7 @@ async function main(): Promise<void> {
 
 	// ----- Mutations -----
 
-	console.log(`Bumping ${versionType} version...`);
+	console.log(`Setting version to ${newVersion}...`);
 	manifest.version = newVersion;
 	await Deno.writeTextFile(manifestPath, serializeLike(manifestText, manifest));
 
@@ -575,9 +777,11 @@ async function main(): Promise<void> {
 
 		console.log(`Version bumped to: ${green(tagName)}`);
 
-		console.log("Pushing to remote...");
-		await runOrThrow(["git", "push"]);
-		await runOrThrow(["git", "push", "origin", `refs/tags/${tagName}`]);
+		if (push) {
+			console.log("Pushing to remote...");
+			await runOrThrow(["git", "push"]);
+			await runOrThrow(["git", "push", "origin", `refs/tags/${tagName}`]);
+		}
 	} catch (e) {
 		console.error(red(`Error: ${(e as Error).message}`));
 		console.error();
@@ -597,6 +801,13 @@ async function main(): Promise<void> {
 	}
 
 	console.log(green(`Release complete! New version: ${tagName}`));
+	if (!push) {
+		console.log(
+			yellow(
+				`Not pushed. When ready:  git push && git push origin refs/tags/${tagName}`,
+			),
+		);
+	}
 }
 
 if (import.meta.main) {

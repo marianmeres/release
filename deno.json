@@ -1,20 +1,17 @@
 {
-  "name": "@marianmeres/deno-release",
+  "name": "@marianmeres/release",
   "version": "1.5.0",
-  "exports": "./deno-release.ts",
+  "exports": "./release.ts",
   "tasks": {
     "test": "deno test -A",
-    "release": "deno run -A deno-release.ts",
+    "release": "deno run -A release.ts",
     "publish": "deno publish",
     "rp": "deno task release -y && deno publish",
     "rpm": "deno task release minor -y && deno publish"
   },
   "imports": {},
   "publish": {
-    "exclude": [
-      "tmp",
-      "*.test.ts"
-    ]
+    "exclude": ["tmp", "*.test.ts"]
   },
   "fmt": {
     "useTabs": true,

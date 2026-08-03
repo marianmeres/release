@@ -1,30 +1,25 @@
-# @marianmeres/deno-release
-
-> ## ⚠ Renamed to [`@marianmeres/release`](https://jsr.io/@marianmeres/release)
->
-> This is the **final release under the `deno-release` name** — the name became
-> inaccurate once the tool learned to release npm projects too. This version is
-> feature-complete and will keep working indefinitely, but all future
-> development happens under the new name.
->
-> To migrate, change your task to:
->
-> ```bash
-> deno run -A jsr:@marianmeres/release
-> ```
+# @marianmeres/release
 
 An opinionated, interactive CLI tool for releasing Deno / JSR / npm projects.
 Bumps the version in `deno.json` (or `jsr.json`, or `package.json`), creates an
 annotated git tag, and pushes the commit together with the new tag to the remote
 repository.
 
+> Renamed from `@marianmeres/deno-release`, which is frozen at 1.5.0 — the old
+> name became inaccurate once the tool learned to release npm projects too.
+> Migrating is a one-line change; see [Migrating from `deno-release`](#migrating-from-deno-release).
+
 ## Features
 
-- Semantic versioning (`major`, `minor`, `patch`)
+- Bump by keyword (`major`, `minor`, `patch`) or to an exact version
+- Prerelease versions (`1.2.3-rc.1`), promoted correctly by a later bump
 - Interactive confirmation before making changes
-- Non-interactive mode with `--yes` flag for CI/CD pipelines
-- `--dry-run` mode to preview actions without touching anything
-- `--verbose` mode for diagnostic command logging
+- Non-interactive mode with `--yes` for CI/CD pipelines
+- `--dry-run` to preview actions without touching anything
+- `--verbose` for diagnostic command logging
+- `--tag-prefix` for custom or absent git tag prefixes
+- `--no-push` to stop after the commit and tag
+- Unknown options are **rejected**, never silently treated as message text
 - Supports `deno.json`, `jsr.json` and `package.json` manifests
 - Keeps `package-lock.json` in sync on npm releases (so `npm ci` keeps working)
 - Preserves the original indentation of the manifest file
@@ -32,53 +27,62 @@ repository.
 - Warns when not on `main`/`master` branch
 - Pre-flight checks: tag does not already exist, `origin` remote is configured
 - Pushes only the newly created tag (not all local tags)
-- Creates annotated git tags with an optional custom message
 - Zero runtime dependencies
 
 ## Usage
 
+```
+release [<major|minor|patch|X.Y.Z[-pre]>] [message...] [options]
+```
+
+| Option             | Alias | Effect                                         |
+| ------------------ | ----- | ---------------------------------------------- |
+| `--yes`            | `-y`  | Skip confirmation prompts (for CI).            |
+| `--dry-run`        | `-n`  | Preview everything; change nothing.            |
+| `--verbose`        |       | Log every git command before it runs.          |
+| `--help`           | `-h`  | Show usage.                                    |
+| `--tag-prefix <s>` |       | Git tag prefix (default `v`; `""` for none).   |
+| `--no-push`        |       | Create the commit and tag, but do not push.    |
+| `--`               |       | Treat all remaining arguments as message text. |
+
+Options can appear anywhere in the argument list.
+
 ### Via `deno run`
 
 ```bash
-# Patch release (1.0.0 -> 1.0.1)
-deno run -A jsr:@marianmeres/deno-release patch
+# Patch release (1.0.0 -> 1.0.1); patch is the default
+deno run -A jsr:@marianmeres/release patch
 
-# Minor release (1.0.0 -> 1.1.0)
-deno run -A jsr:@marianmeres/deno-release minor
+# Minor / major
+deno run -A jsr:@marianmeres/release minor
+deno run -A jsr:@marianmeres/release major
 
-# Major release (1.0.0 -> 2.0.0)
-deno run -A jsr:@marianmeres/deno-release major
+# Exact version, including prereleases
+deno run -A jsr:@marianmeres/release 1.2.3
+deno run -A jsr:@marianmeres/release 2.0.0-rc.1
 
 # With custom message
-deno run -A jsr:@marianmeres/deno-release patch "Fixed critical bug"
+deno run -A jsr:@marianmeres/release patch "Fixed critical bug"
 
 # Skip confirmation prompts (useful for CI/CD)
-deno run -A jsr:@marianmeres/deno-release --yes patch
-deno run -A jsr:@marianmeres/deno-release -y minor "New feature"
+deno run -A jsr:@marianmeres/release --yes patch
 
 # Preview without making changes
-deno run -A jsr:@marianmeres/deno-release --dry-run minor
-deno run -A jsr:@marianmeres/deno-release -n patch
+deno run -A jsr:@marianmeres/release --dry-run minor
 
-# Log each git command that is executed
-deno run -A jsr:@marianmeres/deno-release --verbose patch
+# Unprefixed tag, and stop before pushing
+deno run -A jsr:@marianmeres/release patch --tag-prefix "" --no-push
 ```
-
-Flags can appear anywhere in the argument list.
 
 ### As a Deno task
 
-Add to your `deno.json`:
-
 ```json
 {
-  "tasks": {
-    "release": "deno run -A jsr:@marianmeres/deno-release"
-  }
+	"tasks": {
+		"release": "deno run -A jsr:@marianmeres/release"
+	}
 }
 ```
-
-Then run:
 
 ```bash
 deno task release patch
@@ -89,16 +93,7 @@ deno task release --dry-run minor
 ### Install globally
 
 ```bash
-deno install -A -g -n release jsr:@marianmeres/deno-release
-```
-
-Then use anywhere:
-
-```bash
-release patch
-release minor "New feature"
-release --yes patch   # non-interactive
-release --dry-run     # preview only
+deno install -A -g -n release jsr:@marianmeres/release
 ```
 
 ### npm projects
@@ -108,9 +103,9 @@ configure:
 
 ```json
 {
-  "scripts": {
-    "release": "deno run -A jsr:@marianmeres/deno-release"
-  }
+	"scripts": {
+		"release": "deno run -A jsr:@marianmeres/release"
+	}
 }
 ```
 
@@ -122,6 +117,34 @@ npm run release -- minor "Added new feature"
 The tool never publishes to npm; it only bumps, commits, tags and pushes, so
 `"private": true` packages are fine.
 
+If you publish before pushing, `--no-push` keeps a failed publish from leaving a
+tag on the remote:
+
+```json
+{
+	"scripts": {
+		"rp": "npm run build && deno run -A jsr:@marianmeres/release patch --no-push -y && npm publish && git push --follow-tags"
+	}
+}
+```
+
+## Versions
+
+The version argument is either a bump keyword (`major`, `minor`, `patch`) or an
+exact version. Exact versions may carry a prerelease label; build metadata
+(`+sha`) is rejected, since git tags and registries treat it inconsistently.
+
+A prerelease counts as the release it precedes, matching `npm version`:
+
+```
+1.2.3-rc.1  + patch  ->  1.2.3
+1.2.3-rc.1  + minor  ->  1.3.0
+1.2.3-rc.1  + major  ->  2.0.0
+```
+
+Without that rule, releasing an explicit prerelease would leave the manifest in
+a state no keyword bump could move forward.
+
 ## Manifest resolution
 
 The manifest is the first of `deno.json`, `jsr.json`, `package.json` that
@@ -130,7 +153,7 @@ are skipped, so a `deno.json` kept purely for tasks / imports next to a
 versioned `package.json` resolves to the `package.json`.
 
 When more than one candidate is present, the chosen one is printed together
-with a note listing the others (which are *not* updated).
+with a note listing the others (which are _not_ updated).
 
 ## Lockfiles
 
@@ -152,27 +175,28 @@ not cosmetic: `npm ci` refuses to run when the lockfile disagrees with
 
 ## API
 
-The package also exports `bumpVersion` and `syncPackageLockVersion` utility
-functions and a `VersionType` type. Importing the module has **no side
-effects** — the CLI only runs when the file is executed directly.
+This is a CLI first, but the pure helpers are exported for reuse. Importing the
+module has **no side effects** — the CLI only runs when the file is executed
+directly.
 
 ```ts
-import { bumpVersion, type VersionType } from "jsr:@marianmeres/deno-release";
+import { bumpVersion, type VersionType } from "jsr:@marianmeres/release";
 
 bumpVersion("1.2.3", "patch"); // "1.2.4"
 bumpVersion("1.2.3", "minor"); // "1.3.0"
 bumpVersion("1.2.3", "major"); // "2.0.0"
+bumpVersion("1.2.3-rc.1", "patch"); // "1.2.3"
 
 // Invalid input throws a standard Error:
 try {
-  bumpVersion("not-semver", "patch");
+	bumpVersion("not-semver", "patch");
 } catch (e) {
-  console.error((e as Error).message);
+	console.error((e as Error).message);
 }
 ```
 
 ```ts
-import { syncPackageLockVersion } from "jsr:@marianmeres/deno-release";
+import { syncPackageLockVersion } from "jsr:@marianmeres/release";
 
 // returns the patched document text (or the input unchanged if the lockfile
 // carries no root version); throws if the input is not valid JSON
@@ -184,7 +208,7 @@ const patched = syncPackageLockVersion(lockFileText, "1.2.4");
 - Your project must have a `deno.json`, `jsr.json` or `package.json` with a
   `version` field
 - Must be inside a git repository
-- An `origin` remote must be configured
+- An `origin` remote must be configured (unless `--no-push`)
 - All changes must be committed before releasing (can be bypassed with
   `--dry-run`)
 
@@ -205,51 +229,65 @@ const patched = syncPackageLockVersion(lockFileText, "1.2.4");
 If any of the mutation steps (steps 6-9) fail, the tool prints clear
 instructions for rolling back the local state.
 
-## Changes in 1.5.x (backward-compatibility notes)
+## Migrating from `deno-release`
+
+Change the specifier — nothing else:
+
+```diff
+-"release": "deno run -A jsr:@marianmeres/deno-release"
++"release": "deno run -A jsr:@marianmeres/release"
+```
+
+`@marianmeres/deno-release@1.5.0` stays published and keeps working, so there is
+no deadline. It is archived and will receive no further releases.
+
+Two things to check while migrating:
+
+- **`-v` changed meaning.** It is no longer accepted at all. In
+  `@marianmeres/release` 1.x (the old npm CLI) it meant _version_; here it meant
+  _verbose_. It now errors with a hint instead of doing the wrong thing.
+- **Changing the specifier rewrites `deno.lock`.** The next invocation updates
+  the lockfile before the tool runs, and the clean-tree check will then refuse
+  to release. Commit `deno.json` and `deno.lock` together.
+
+## Changes in 2.0.0 (breaking)
+
+- **Renamed** from `@marianmeres/deno-release`.
+- **Unknown options are rejected.** Previously any unrecognized token became
+  part of the commit message, so `--help` prepared a real release with the
+  message `(--help)` and a mistyped flag released silently. Retired 1.x flags
+  (`-v`, `-d`, `--suffix`, `--git-tag-prefix`) name their replacement. Use `--`
+  to pass through message text that starts with a dash.
+- **`-v` no longer means `--verbose`** — it is not accepted. Use `--verbose`.
+- **An exact version is accepted as the first argument.** Previously
+  `release 1.2.3` did a _patch_ bump with `1.2.3` as the commit message.
+- **Prerelease versions are accepted** and promoted correctly by later bumps.
+  `bumpVersion` no longer throws on a prerelease input.
+- **New:** `--help` / `-h`, `--tag-prefix <s>`, `--no-push`, `--`.
+- Dropped from the old npm CLI: multi-directory mode (`-d`) and `--suffix`.
+  Release packages individually; use an exact prerelease version instead of a
+  suffix.
+
+## Changes in 1.5.x
 
 - **`package.json` is now accepted as a manifest**, searched after
-  `deno.json` and `jsr.json`. Repos with a Deno manifest resolve exactly as
-  before; repos with only a `package.json` previously exited with "No manifest
-  found".
-- **Manifest resolution now skips candidates without a string `version`.**
-  Previously the first *existing* candidate won, and a version-less
-  `deno.json` was a hard error even when a versioned manifest sat next to it.
+  `deno.json` and `jsr.json`.
+- **Manifest resolution skips candidates without a string `version`.**
 - **`package-lock.json` is rewritten** on `package.json` releases and included
   in the release commit.
-- Versions are still strictly `X.Y.Z`. npm prerelease / build-metadata
-  versions (`1.0.0-beta.1`, `1.0.0+build`) are rejected.
 
-## Changes from 1.3.x (backward-compatibility notes)
+## Changes from 1.3.x
 
-Most users will notice no difference, but the following behaviors have
-changed:
-
-- **`bumpVersion` / `parseVersion` now throw on invalid input** instead of
-  calling `Deno.exit(1)`. Library callers that previously relied on process
-  termination must now `try`/`catch`. CLI behavior is unchanged (errors are
-  caught at the top level and the process exits with code 1).
-- **The module no longer runs the CLI on import.** Importing
-  `jsr:@marianmeres/deno-release` previously triggered `main()` as a side
-  effect; it now uses `import.meta.main` and only runs when executed
-  directly. Any consumer that depended on the side-effecting import must
-  now call the tool via `deno run` or `deno task`.
-- **Tag push is now scoped to the new tag only** (`git push origin
-  refs/tags/vX.Y.Z`) instead of `git push --tags`. If you relied on the
-  release tool to batch-push unrelated orphan local tags, push them
-  yourself with `git push --tags`.
-- **Manifest indentation is preserved.** If your `deno.json` was
-  previously being rewritten to 2-space indentation on every release,
-  the next release will preserve whatever indentation the file currently
-  has. If you want to switch, reformat the file once manually (e.g. with
-  `deno fmt`) and the tool will respect the new style.
-- **Pre-flight checks may reject releases that previously ran to a mid-way
-  failure.** A release is now refused up-front if the target tag already
+- **`bumpVersion` / `parseVersion` throw on invalid input** instead of
+  calling `Deno.exit(1)`.
+- **The module no longer runs the CLI on import** — it uses `import.meta.main`.
+- **Tag push is scoped to the new tag only** (`git push origin
+  refs/tags/vX.Y.Z`) instead of `git push --tags`.
+- **Manifest indentation is preserved.**
+- **Pre-flight checks** reject a release up-front if the target tag already
   exists locally or if no `origin` remote is configured.
-- **Invalid first arguments that look like a version type typo
-  (e.g. `minro`, `pacth`) now emit a warning** before falling through to
-  the "treat as message, default to patch" behavior.
-- `jsr.json` is now accepted as an alternative to `deno.json`. If both
-  exist, `deno.json` wins.
+- **Version-type typos** (e.g. `minro`, `pacth`) emit a warning.
+- `jsr.json` is accepted as an alternative to `deno.json`.
 
 ## License
 
