@@ -18,6 +18,8 @@ repository.
 - `--verbose` for diagnostic command logging
 - `--tag-prefix` for custom or absent git tag prefixes
 - `--no-push` to stop after the commit and tag
+- `--before-commit <cmd>` to build _between_ the version bump and the commit, so
+  committed artifacts carry the version they are tagged with
 - Unknown options are **rejected**, never silently treated as message text
 - Supports `deno.json`, `jsr.json` and `package.json` manifests
 - Keeps `package-lock.json` in sync on npm releases (so `npm ci` keeps working)
@@ -34,15 +36,16 @@ repository.
 release [<major|minor|patch|X.Y.Z[-pre]>] [message...] [options]
 ```
 
-| Option             | Alias | Effect                                         |
-| ------------------ | ----- | ---------------------------------------------- |
-| `--yes`            | `-y`  | Skip confirmation prompts (for CI).            |
-| `--dry-run`        | `-n`  | Preview everything; change nothing.            |
-| `--verbose`        |       | Log every git command before it runs.          |
-| `--help`           | `-h`  | Show usage.                                    |
-| `--tag-prefix <s>` |       | Git tag prefix (default `v`; `""` for none).   |
-| `--no-push`        |       | Create the commit and tag, but do not push.    |
-| `--`               |       | Treat all remaining arguments as message text. |
+| Option                  | Alias | Effect                                                                                                                                                        |
+| ----------------------- | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--yes`                 | `-y`  | Skip confirmation prompts (for CI).                                                                                                                           |
+| `--dry-run`             | `-n`  | Preview everything; change nothing.                                                                                                                           |
+| `--verbose`             |       | Log every git command before it runs.                                                                                                                         |
+| `--help`                | `-h`  | Show usage.                                                                                                                                                   |
+| `--tag-prefix <s>`      |       | Git tag prefix (default `v`; `""` for none).                                                                                                                  |
+| `--no-push`             |       | Create the commit and tag, but do not push.                                                                                                                   |
+| `--before-commit <cmd>` |       | Run `<cmd>` after the bump, before the commit; commit what it changes. See [Build artifacts that embed the version](#build-artifacts-that-embed-the-version). |
+| `--`                    |       | Treat all remaining arguments as message text.                                                                                                                |
 
 Options can appear anywhere in the argument list.
 
@@ -71,6 +74,9 @@ deno run -A jsr:@marianmeres/release --dry-run minor
 
 # Unprefixed tag, and stop before pushing
 deno run -A jsr:@marianmeres/release patch --tag-prefix "" --no-push
+
+# Rebuild a committed artifact from the bumped manifest, inside the release commit
+deno run -A jsr:@marianmeres/release minor --before-commit "npm run build"
 ```
 
 ### As a Deno task
@@ -127,6 +133,10 @@ tag on the remote:
 }
 ```
 
+Note that this builds with the _old_ version still in `package.json`. That is fine
+when the build output is not committed, or does not embed the version. When it
+does, use `--before-commit` instead (next section).
+
 ## Versions
 
 The version argument is either a bump keyword (`major`, `minor`, `patch`) or an
@@ -172,6 +182,60 @@ not cosmetic: `npm ci` refuses to run when the lockfile disagrees with
   nothing. `bun.lock` / `bun.lockb` are **not** handled — re-run `bun install`
   after releasing.
 
+## Build artifacts that embed the version
+
+Some repos commit a build output that bakes in the package version — a bundled
+`dist/app.js` with an `APP_VERSION` constant, say — and deploy with
+`git checkout vX.Y.Z` on a machine that must not build. Such an artifact can
+only be built once the manifest already carries the new version, but a plain
+release goes bump, commit, tag with no gap. Built before the release, the
+artifact is one version behind the tag; built after, it lands one commit
+_after_ the tag. Either way `git checkout vX.Y.Z` ships the wrong one.
+
+`--before-commit <cmd>` opens that gap. The command runs through the shell
+(`sh -c`; `cmd /c` on Windows) after the manifest and lockfile are written and
+before anything is staged, and **everything it changes is committed together
+with the manifest** (`git add -A`, honouring `.gitignore`):
+
+```json
+{
+	"tasks": {
+		"build": "deno run -A scripts/build.ts",
+		"release": "deno run -A jsr:@marianmeres/release --before-commit \"deno task build\""
+	}
+}
+```
+
+```bash
+deno task release patch
+deno task release minor -y
+```
+
+The command inherits the terminal, runs in the directory the manifest was
+resolved from, and sees these variables on top of the normal environment, so a
+build script need not re-parse the manifest:
+
+| Variable               | Example        |
+| ---------------------- | -------------- |
+| `RELEASE_VERSION`      | `1.3.0`        |
+| `RELEASE_PREV_VERSION` | `1.2.4`        |
+| `RELEASE_TAG`          | `v1.3.0`       |
+| `RELEASE_MANIFEST`     | `package.json` |
+
+Rules:
+
+- One command. To run several, chain them with `&&`; the option may not be
+  repeated.
+- A command that changes nothing is fine; the commit then contains only the
+  manifest, as usual.
+- A non-zero exit aborts the release before anything is staged. The tool
+  restores the manifest (and lockfile) it wrote; files the command itself
+  created or changed are left for you to inspect with `git status`.
+- `--dry-run` prints the command but never runs it.
+- Sweeping the whole tree into the commit is safe because the release refuses
+  to start on a dirty tree (untracked files included). Without the option,
+  staging stays exactly `git add <manifest> [<lockfile>]`.
+
 ## API
 
 This is a CLI first, but the pure helpers are exported for reuse. Importing the
@@ -208,8 +272,8 @@ const patched = syncPackageLockVersion(lockFileText, "1.2.4");
   `version` field
 - Must be inside a git repository
 - An `origin` remote must be configured (unless `--no-push`)
-- All changes must be committed before releasing (can be bypassed with
-  `--dry-run`)
+- All changes must be committed before releasing, untracked files included
+  (can be bypassed with `--dry-run`)
 
 ## What it does
 
@@ -221,12 +285,15 @@ const patched = syncPackageLockVersion(lockFileText, "1.2.4");
 5. Shows a preview of changes and asks for confirmation
 6. Updates the `version` field in the manifest **preserving the original
    indentation**, and syncs `package-lock.json` on npm releases
-7. Commits the change with message `Release: X.Y.Z [(custom message)]`
-8. Creates annotated tag `vX.Y.Z` with the same message
-9. Pushes the commit, then pushes the new tag explicitly to `origin`
+7. Runs the `--before-commit` command, if given (a failure here aborts and
+   restores the files from step 6)
+8. Commits the change with message `Release: X.Y.Z [(custom message)]` —
+   just the manifest and lockfile, or the whole tree with `--before-commit`
+9. Creates annotated tag `vX.Y.Z` with the same message
+10. Pushes the commit, then pushes the new tag explicitly to `origin`
 
-If any of the mutation steps (steps 6-9) fail, the tool prints clear
-instructions for rolling back the local state.
+If any of the git steps (8-10) fail, the tool prints clear instructions for
+rolling back the local state.
 
 ## Legacy
 

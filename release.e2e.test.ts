@@ -261,6 +261,7 @@ Deno.test("--help prints usage and changes nothing", async () => {
 	assertEquals(code, 0, out);
 	assert(out.includes("Usage:"), `no usage block:\n${out}`);
 	assert(out.includes("--tag-prefix"), `usage omits --tag-prefix:\n${out}`);
+	assert(out.includes("--before-commit"), `usage omits --before-commit:\n${out}`);
 	assertEquals(await state(repo), before);
 });
 
@@ -353,4 +354,303 @@ Deno.test("--no-push works without an origin remote at all", async () => {
 	const { code, out } = await release(repo, "--yes", "patch", "--no-push");
 	assertEquals(code, 0, out);
 	assertEquals((await state(repo)).version, "2.0.2");
+});
+
+// ---------------------------------------------------------------------------
+// --before-commit (2.1.0): run a command between the version bump and the
+// release commit, for repos that commit build artifacts embedding the version.
+// Without it such an artifact is always built one commit *after* the tag.
+// ---------------------------------------------------------------------------
+
+async function gitOut(cwd: string, ...args: string[]): Promise<string> {
+	const { code, stdout, stderr } = await new Deno.Command("git", {
+		args,
+		cwd,
+		stdout: "piped",
+		stderr: "piped",
+	}).output();
+	if (code !== 0) {
+		throw new Error(
+			`git ${args.join(" ")} failed: ${new TextDecoder().decode(stderr)}`,
+		);
+	}
+	return new TextDecoder().decode(stdout).trim();
+}
+
+/** Paths touched by the commit at `rev`, sorted. */
+async function filesIn(repo: string, rev: string): Promise<string[]> {
+	const out = await gitOut(
+		repo,
+		"diff-tree",
+		"--no-commit-id",
+		"--name-only",
+		"-r",
+		rev,
+	);
+	return out.split("\n").filter(Boolean).sort();
+}
+
+async function exists(path: string): Promise<boolean> {
+	try {
+		await Deno.stat(path);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+Deno.test("--before-commit: the command's output lands in the tagged commit", async () => {
+	const repo = await makeRepo({ "package.json": PKG_TABS });
+	const { code, out } = await release(
+		repo,
+		"--yes",
+		"--verbose",
+		"patch",
+		"--before-commit",
+		"cp package.json built.json",
+	);
+	assertEquals(code, 0, out);
+
+	// built from the *bumped* manifest — the whole point of the option
+	const built = await gitOut(repo, "show", "HEAD:built.json");
+	assertEquals(JSON.parse(built).version, "2.0.2");
+	assertEquals(await filesIn(repo, "HEAD"), ["built.json", "package.json"]);
+	assertEquals(
+		await gitOut(repo, "rev-parse", "v2.0.2^{commit}"),
+		await gitOut(repo, "rev-parse", "HEAD"),
+		"tag does not point at the release commit",
+	);
+	assertEquals(await gitOut(repo, "status", "--porcelain"), "", "tree left dirty");
+
+	assert(
+		out.includes("Run before commit: cp package.json built.json"),
+		`preview omits the command:\n${out}`,
+	);
+	assert(
+		out.includes("$ sh -c 'cp package.json built.json'"),
+		`no verbose trace:\n${out}`,
+	);
+	assert(out.includes("$ git add -A"), `whole tree not staged:\n${out}`);
+});
+
+Deno.test("--before-commit=<cmd> form behaves identically", async () => {
+	const repo = await makeRepo({ "package.json": PKG_TABS });
+	const { code, out } = await release(
+		repo,
+		"--yes",
+		"patch",
+		"--before-commit=cp package.json built.json",
+	);
+	assertEquals(code, 0, out);
+	assertEquals(
+		JSON.parse(await gitOut(repo, "show", "HEAD:built.json")).version,
+		"2.0.2",
+	);
+	assertEquals(await filesIn(repo, "HEAD"), ["built.json", "package.json"]);
+});
+
+Deno.test("--before-commit: RELEASE_* env vars describe the release", async () => {
+	const repo = await makeRepo({ "package.json": PKG_TABS });
+	const cmd =
+		'printf "%s|%s|%s|%s" "$RELEASE_VERSION" "$RELEASE_PREV_VERSION" "$RELEASE_TAG" "$RELEASE_MANIFEST" > env.txt';
+	const { code, out } = await release(repo, "--yes", "patch", "--before-commit", cmd);
+	assertEquals(code, 0, out);
+	assertEquals(
+		await gitOut(repo, "show", "HEAD:env.txt"),
+		"2.0.2|2.0.1|v2.0.2|package.json",
+	);
+});
+
+Deno.test("--before-commit: git-ignored output is not staged", async () => {
+	const repo = await makeRepo({ "package.json": PKG_TABS, ".gitignore": "out/\n" });
+	const { code, out } = await release(
+		repo,
+		"--yes",
+		"patch",
+		"--before-commit",
+		"mkdir -p out && touch out/x",
+	);
+	assertEquals(code, 0, out);
+	assert(await exists(`${repo}/out/x`), "command did not run");
+	assertEquals(await filesIn(repo, "HEAD"), ["package.json"]);
+	assertEquals(
+		await gitOut(repo, "status", "--porcelain"),
+		"",
+		"ignored output shows as dirty",
+	);
+});
+
+Deno.test("--before-commit: the lockfile is synced before the command runs", async () => {
+	// an npm build reading package-lock.json must already see the new version
+	const repo = await makeRepo({
+		"package.json": PKG_TABS,
+		"package-lock.json": LOCK_TABS,
+	});
+	const { code, out } = await release(
+		repo,
+		"--yes",
+		"patch",
+		"--before-commit",
+		"cp package-lock.json lock-copy.json",
+	);
+	assertEquals(code, 0, out);
+	assertEquals(
+		JSON.parse(await gitOut(repo, "show", "HEAD:lock-copy.json")).version,
+		"2.0.2",
+	);
+	assertEquals(await filesIn(repo, "HEAD"), [
+		"lock-copy.json",
+		"package-lock.json",
+		"package.json",
+	]);
+});
+
+Deno.test("--before-commit: a failing command aborts and restores the bump", async () => {
+	const repo = await makeRepo({
+		"package.json": PKG_TABS,
+		"package-lock.json": LOCK_TABS,
+	});
+	const before = await state(repo);
+	const { code, out } = await release(
+		repo,
+		"--yes",
+		"patch",
+		"--before-commit",
+		"touch leftover.txt && exit 3",
+	);
+	assertEquals(code, 1, out);
+	assert(out.includes("exit 3"), `exit code not reported:\n${out}`);
+	assert(out.includes("touch leftover.txt && exit 3"), `command not named:\n${out}`);
+	assert(
+		out.includes("Restored package.json and package-lock.json"),
+		`restore not reported:\n${out}`,
+	);
+
+	// what the tool itself wrote is restored byte-for-byte …
+	assertEquals(await Deno.readTextFile(`${repo}/package.json`), PKG_TABS);
+	assertEquals(await Deno.readTextFile(`${repo}/package-lock.json`), LOCK_TABS);
+	// … nothing was committed or tagged …
+	assertEquals(await state(repo), before);
+	assertEquals(await tagsIn(repo), []);
+	// … and the command's own leftovers are the user's to inspect, not ours to clean
+	assert(
+		await exists(`${repo}/leftover.txt`),
+		"tool must not delete the command's files",
+	);
+	assert(out.includes("git status"), `no pointer to leftovers:\n${out}`);
+	assertEquals(await gitOut(repo, "status", "--porcelain"), "?? leftover.txt");
+});
+
+Deno.test("--before-commit: --dry-run previews the command without running it", async () => {
+	const repo = await makeRepo({ "package.json": PKG_TABS });
+	const before = await state(repo);
+	const { code, out } = await release(
+		repo,
+		"--dry-run",
+		"patch",
+		"--before-commit",
+		"touch ran.txt",
+	);
+	assertEquals(code, 0, out);
+	assert(
+		out.includes("Run before commit: touch ran.txt"),
+		`preview omits the command:\n${out}`,
+	);
+	assert(!(await exists(`${repo}/ran.txt`)), "command ran under --dry-run");
+	assertEquals(await state(repo), before);
+});
+
+Deno.test("--before-commit without a value is an error, nothing mutated", async () => {
+	const repo = await makeRepo({ "package.json": PKG_TABS });
+	const before = await state(repo);
+	const { code, out } = await release(repo, "--yes", "patch", "--before-commit");
+	assertEquals(code, 1, out);
+	assert(out.includes("requires a value"), `unclear error:\n${out}`);
+	assertEquals(await state(repo), before);
+});
+
+Deno.test("--before-commit with an empty command is an error", async () => {
+	const repo = await makeRepo({ "package.json": PKG_TABS });
+	const before = await state(repo);
+	const { code, out } = await release(repo, "--yes", "patch", "--before-commit", "  ");
+	assertEquals(code, 1, out);
+	assert(out.includes("non-empty"), `unclear error:\n${out}`);
+	assertEquals(await state(repo), before);
+});
+
+Deno.test("--before-commit given twice is an error, nothing mutated", async () => {
+	const repo = await makeRepo({ "package.json": PKG_TABS });
+	const before = await state(repo);
+	const { code, out } = await release(
+		repo,
+		"--yes",
+		"patch",
+		"--before-commit",
+		"true",
+		"--before-commit=true",
+	);
+	assertEquals(code, 1, out);
+	assert(out.includes("only once") && out.includes("&&"), `unclear error:\n${out}`);
+	assertEquals(await state(repo), before);
+	assertEquals(await tagsIn(repo), []);
+});
+
+Deno.test("--before-commit typo gets a did-you-mean", async () => {
+	const repo = await makeRepo({ "package.json": PKG_TABS });
+	const { code, out } = await release(repo, "--before-comit", "true");
+	assertEquals(code, 1, out);
+	assert(out.includes("--before-commit"), `no suggestion offered:\n${out}`);
+});
+
+Deno.test("without --before-commit only the manifest is staged, never the whole tree", async () => {
+	// In a clean tree both forms yield the same commit, so the verbose trace is
+	// the evidence that the targeted `git add` path is still the default.
+	const repo = await makeRepo({ "package.json": PKG_TABS });
+	const { code, out } = await release(repo, "--yes", "--verbose", "patch");
+	assertEquals(code, 0, out);
+	assert(out.includes("$ git add package.json"), `targeted add missing:\n${out}`);
+	assert(
+		!out.includes("git add -A"),
+		`whole tree staged without --before-commit:\n${out}`,
+	);
+	assertEquals(await filesIn(repo, "HEAD"), ["package.json"]);
+});
+
+Deno.test("--before-commit: a later git failure widens the rollback hint to the whole tree", async () => {
+	const repo = await makeRepo({ "package.json": PKG_TABS });
+	// pre-flight only asks for origin's URL; the push itself is what fails
+	await git(repo, "remote", "set-url", "origin", `${repo}/../does-not-exist.git`);
+	const { code, out } = await release(
+		repo,
+		"--yes",
+		"patch",
+		"--before-commit",
+		"cp package.json built.json",
+	);
+	assertEquals(code, 1, out);
+	assert(out.includes("partially-released"), `no rollback hint:\n${out}`);
+	assert(out.includes("git checkout HEAD -- ."), `hint not widened:\n${out}`);
+	// the command did run and its output was committed before the push failed
+	assertEquals(await filesIn(repo, "HEAD"), ["built.json", "package.json"]);
+});
+
+Deno.test("clean check sees untracked files even under status.showUntrackedFiles=no", async () => {
+	// `git status --porcelain` honours that setting; without an explicit
+	// --untracked-files the stray file would pass pre-flight and then be swept
+	// into the release commit by `git add -A`.
+	const repo = await makeRepo({ "package.json": PKG_TABS });
+	await git(repo, "config", "status.showUntrackedFiles", "no");
+	await Deno.writeTextFile(`${repo}/stray.txt`, "oops\n");
+	const before = await state(repo);
+	const { code, out } = await release(
+		repo,
+		"--yes",
+		"patch",
+		"--before-commit",
+		"true",
+	);
+	assertEquals(code, 1, out);
+	assert(out.includes("uncommitted changes"), `unclear error:\n${out}`);
+	assertEquals(await state(repo), before);
+	assertEquals(await tagsIn(repo), []);
 });

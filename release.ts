@@ -12,6 +12,11 @@
  * The manifest is the first of `deno.json`, `jsr.json`, `package.json` that
  * exists and carries a string `version` field.
  *
+ * With `--before-commit <cmd>`, a shell command (typically a build) runs after
+ * the manifest is bumped and before the release commit, and everything it
+ * changes is committed alongside the manifest. This is for repos that commit
+ * build artifacts embedding the package version.
+ *
  * This is a CLI first; the pure {@link bumpVersion} and
  * {@link syncPackageLockVersion} helpers are exported for reuse. Importing the
  * module does not execute the CLI.
@@ -24,6 +29,7 @@
  * deno run -A jsr:@marianmeres/release 1.2.3-rc.1         # exact version
  * deno run -A jsr:@marianmeres/release --yes patch        # skip confirmations
  * deno run -A jsr:@marianmeres/release --dry-run minor
+ * deno run -A jsr:@marianmeres/release --before-commit "npm run build"
  * deno run -A jsr:@marianmeres/release --help
  * ```
  *
@@ -99,6 +105,34 @@ async function runOrThrow(cmd: string[]): Promise<string> {
 		);
 	}
 	return stdout;
+}
+
+/** Shell invocation for a user-supplied command string. */
+function shellCommand(cmd: string): string[] {
+	return Deno.build.os === "windows" ? ["cmd", "/c", cmd] : ["sh", "-c", cmd];
+}
+
+/**
+ * Runs a user-supplied command string through the platform shell with stdio
+ * inherited, so its output (build logs, errors) reaches the terminal as-is.
+ *
+ * Unlike {@link run}, nothing is captured; the caller only learns how the
+ * command ended. `env` is merged into the inherited environment.
+ */
+async function runShellInherited(
+	cmd: string,
+	env: Record<string, string>,
+): Promise<{ code: number; signal: Deno.Signal | null }> {
+	const argv = shellCommand(cmd);
+	if (VERBOSE) console.log(dim(`$ ${argv[0]} ${argv[1]} '${cmd}'`));
+	const { code, signal } = await new Deno.Command(argv[0], {
+		args: argv.slice(1),
+		env,
+		stdin: "inherit",
+		stdout: "inherit",
+		stderr: "inherit",
+	}).output();
+	return { code, signal };
 }
 
 /** Check whether a plain file exists at `path`. */
@@ -289,6 +323,11 @@ interface ParsedArgs {
 	tagPrefix: string;
 	/** Whether to push the commit and tag to `origin`. */
 	push: boolean;
+	/**
+	 * Shell command to run after the manifest is written and before anything
+	 * is staged; `null` when not requested. When set, the whole tree is staged.
+	 */
+	beforeCommit: string | null;
 }
 
 const KNOWN_FLAGS = [
@@ -298,6 +337,7 @@ const KNOWN_FLAGS = [
 	"--help",
 	"--tag-prefix",
 	"--no-push",
+	"--before-commit",
 ] as const;
 
 /**
@@ -379,6 +419,12 @@ Options:
   -h, --help          Show this help.
       --tag-prefix <s>  Git tag prefix (default "v"; "" for no prefix).
       --no-push       Create the commit and tag, but do not push.
+      --before-commit <cmd>
+                      Run <cmd> through the shell after the version is written
+                      and before the commit; everything it changes is committed
+                      too. Sees RELEASE_VERSION, RELEASE_PREV_VERSION,
+                      RELEASE_TAG and RELEASE_MANIFEST in its environment.
+                      Non-zero exit aborts the release and restores the bump.
   --                  Treat all remaining arguments as message text.
 
 Examples:
@@ -386,7 +432,8 @@ Examples:
   release minor "Added new feature"
   release 1.2.3-rc.1 --yes
   release --dry-run major
-  release patch --tag-prefix "" --no-push`;
+  release patch --tag-prefix "" --no-push
+  release minor --before-commit "npm run build"`;
 }
 
 /**
@@ -405,6 +452,22 @@ function parseArgs(argv: string[]): ParsedArgs {
 	let help = false;
 	let tagPrefix = "v";
 	let push = true;
+	let beforeCommit: string | null = null;
+
+	// One hook only: a second occurrence is more likely a mistake (two tasks
+	// composing flags) than an intent to run both, and the order would be
+	// implicit. `&&` makes the order explicit and keeps a single code path.
+	const setBeforeCommit = (cmd: string) => {
+		if (beforeCommit !== null) {
+			throw new Error(
+				`Option '--before-commit' may be given only once (chain commands with '&&').`,
+			);
+		}
+		if (!cmd.trim()) {
+			throw new Error(`Option '--before-commit' requires a non-empty command.`);
+		}
+		beforeCommit = cmd;
+	};
 
 	for (let i = 0; i < argv.length; i++) {
 		const a = argv[i];
@@ -425,6 +488,15 @@ function parseArgs(argv: string[]): ParsedArgs {
 			tagPrefix = argv[++i];
 		} else if (a.startsWith("--tag-prefix=")) {
 			tagPrefix = a.slice("--tag-prefix=".length);
+		} else if (a === "--before-commit") {
+			if (i + 1 >= argv.length) {
+				throw new Error(
+					`Option '--before-commit' requires a value (a shell command).`,
+				);
+			}
+			setBeforeCommit(argv[++i]);
+		} else if (a.startsWith("--before-commit=")) {
+			setBeforeCommit(a.slice("--before-commit=".length));
 		} else if (a.startsWith("-") && a !== "-") {
 			throw unknownFlagError(a);
 		} else rest.push(a);
@@ -461,6 +533,7 @@ function parseArgs(argv: string[]): ParsedArgs {
 		help,
 		tagPrefix,
 		push,
+		beforeCommit,
 	};
 }
 
@@ -527,17 +600,21 @@ async function resolveManifest(): Promise<ResolvedManifest> {
  *
  * Performs the following steps:
  * 1. Parses CLI args (version spec, message, `--yes`, `--dry-run`, `--verbose`,
- *    `--help`, `--tag-prefix`, `--no-push`); unknown options are rejected
+ *    `--help`, `--tag-prefix`, `--no-push`, `--before-commit`); unknown
+ *    options are rejected
  * 2. Validates git repository + manifest existence
- * 3. Checks for uncommitted changes
+ * 3. Checks for uncommitted changes (whole repo, untracked files included)
  * 4. Warns if not on main/master branch
  * 5. Pre-flight: tag must not already exist, `origin` must be configured, and
  *    `package-lock.json` (npm projects only) must be parseable
  * 6. Shows preview and asks for confirmation (unless `--yes` / `--dry-run`)
  * 7. Updates version in the manifest (preserving original indentation), and
  *    syncs `package-lock.json` when the manifest is a `package.json`
- * 8. Creates commit and annotated tag
- * 9. Pushes the commit and the new tag to `origin`
+ * 8. Runs the `--before-commit` command, if given; on failure restores the
+ *    files written in step 7 and aborts
+ * 9. Stages the manifest (+ lockfile) — or, with `--before-commit`, the whole
+ *    tree — then creates the commit and annotated tag
+ * 10. Pushes the commit and the new tag to `origin`
  */
 async function main(): Promise<void> {
 	let args: ParsedArgs;
@@ -547,7 +624,16 @@ async function main(): Promise<void> {
 		console.error(red(`Error: ${(e as Error).message}`));
 		Deno.exit(1);
 	}
-	const { spec, customMessage, skipPrompts, dryRun, verbose, tagPrefix, push } = args;
+	const {
+		spec,
+		customMessage,
+		skipPrompts,
+		dryRun,
+		verbose,
+		tagPrefix,
+		push,
+		beforeCommit,
+	} = args;
 	VERBOSE = verbose;
 
 	if (args.help) {
@@ -575,8 +661,16 @@ async function main(): Promise<void> {
 		candidates,
 	} = await resolveManifest();
 
-	// Check for uncommitted changes — allowed in dry-run so preview still works
-	const { stdout: status } = await run(["git", "status", "--porcelain"]);
+	// Check for uncommitted changes — allowed in dry-run so preview still works.
+	// Untracked files are requested explicitly: `status.showUntrackedFiles=no`
+	// would otherwise hide them here while `git add -A` (used with
+	// --before-commit) would still sweep them into the release commit.
+	const { stdout: status } = await run([
+		"git",
+		"status",
+		"--porcelain",
+		"--untracked-files=normal",
+	]);
 	if (status) {
 		if (dryRun) {
 			console.warn(
@@ -730,6 +824,13 @@ async function main(): Promise<void> {
 	if (lockPath) {
 		console.log(`  - Sync the root version in ${lockPath}`);
 	}
+	if (beforeCommit) {
+		console.log(
+			`  - Run before commit: ${beforeCommit} ${
+				dim("(and stage whatever it changes)")
+			}`,
+		);
+	}
 	console.log(`  - Create a git commit: '${commitMessage}'`);
 	console.log(`  - Create an annotated git tag: '${tagName}'`);
 	if (push) {
@@ -758,6 +859,7 @@ async function main(): Promise<void> {
 	manifest.version = newVersion;
 	await Deno.writeTextFile(manifestPath, serializeLike(manifestText, manifest));
 
+	let lockWritten = false;
 	if (lockPath) {
 		const patched = syncPackageLockVersion(lockText, newVersion);
 		if (patched === lockText) {
@@ -766,12 +868,64 @@ async function main(): Promise<void> {
 			);
 		} else {
 			await Deno.writeTextFile(lockPath, patched);
+			lockWritten = true;
+		}
+	}
+
+	// The hook runs with the bumped manifest on disk and nothing staged, so a
+	// build here embeds the new version and lands in the tagged commit.
+	if (beforeCommit) {
+		console.log(`Running before-commit command: ${beforeCommit}`);
+		const { code, signal } = await runShellInherited(beforeCommit, {
+			RELEASE_VERSION: newVersion,
+			RELEASE_PREV_VERSION: currentVersion,
+			RELEASE_TAG: tagName,
+			RELEASE_MANIFEST: manifestPath,
+		});
+		if (code !== 0) {
+			const how = signal ? `killed by ${signal}` : `exit ${code}`;
+			console.error(
+				red(`Error: --before-commit command failed (${how}): ${beforeCommit}`),
+			);
+			// Restore exactly what *we* wrote; anything the command left behind
+			// is the user's to inspect — `git clean` would be guesswork.
+			const written = lockWritten && lockPath
+				? [manifestPath, lockPath]
+				: [manifestPath];
+			try {
+				await Deno.writeTextFile(manifestPath, manifestText);
+				if (lockWritten && lockPath) await Deno.writeTextFile(lockPath, lockText);
+				console.error(`Restored ${written.join(" and ")}.`);
+			} catch (e) {
+				console.error(
+					yellow(
+						`Could not restore ${written.join(" and ")}: ${
+							(e as Error).message
+						}`,
+					),
+				);
+				console.error(
+					`  git checkout HEAD -- ${
+						written.join(" ")
+					}   # discard the version bump`,
+				);
+			}
+			console.error(
+				"Files the command created or changed were left alone — see `git status`.",
+			);
+			Deno.exit(1);
 		}
 	}
 
 	try {
-		await runOrThrow(["git", "add", manifestPath]);
-		if (lockPath) await runOrThrow(["git", "add", lockPath]);
+		if (beforeCommit) {
+			// Pre-flight required a clean tree (untracked files included), so
+			// the only changes here are the bump and the hook's output.
+			await runOrThrow(["git", "add", "-A"]);
+		} else {
+			await runOrThrow(["git", "add", manifestPath]);
+			if (lockPath) await runOrThrow(["git", "add", lockPath]);
+		}
 		await runOrThrow(["git", "commit", "-m", commitMessage]);
 		await runOrThrow(["git", "tag", "-a", tagName, "-m", commitMessage]);
 
@@ -792,11 +946,20 @@ async function main(): Promise<void> {
 		);
 		console.error(`  git tag -d ${tagName}     # remove local tag if created`);
 		console.error(`  git reset --hard HEAD~1   # undo local commit if created`);
-		console.error(
-			`  git checkout -- ${manifestPath}${
-				lockPath ? ` ${lockPath}` : ""
-			}   # discard the version bump if it was not yet committed`,
-		);
+		// `HEAD` (not the index) so the hint also undoes a successful `git add`
+		// when the commit itself failed. With --before-commit the tree holds the
+		// hook's output too, hence `.`; new untracked files survive a checkout.
+		if (beforeCommit) {
+			console.error(
+				`  git checkout HEAD -- .    # discard the uncommitted bump and build output (new files: see git status)`,
+			);
+		} else {
+			console.error(
+				`  git checkout HEAD -- ${manifestPath}${
+					lockPath ? ` ${lockPath}` : ""
+				}   # discard the version bump if it was not yet committed`,
+			);
+		}
 		Deno.exit(1);
 	}
 

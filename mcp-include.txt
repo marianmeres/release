@@ -1,3 +1,5 @@
 CLI tool to automate semantic version releases for Deno, JSR and npm projects. Bumps version
-in deno.json / jsr.json / package.json (syncing package-lock.json), commits, tags, and pushes
-to git remote. Also exports the pure bumpVersion / syncPackageLockVersion helpers for reuse.
+in deno.json / jsr.json / package.json (syncing package-lock.json), optionally runs a build
+command between the bump and the commit (--before-commit, for committed artifacts that embed
+the version), commits, tags, and pushes to git remote. Also exports the pure bumpVersion /
+syncPackageLockVersion helpers for reuse.
