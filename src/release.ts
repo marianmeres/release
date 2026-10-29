@@ -1,4 +1,4 @@
-#!/usr/bin/env -S deno run -A
+#!/usr/bin/env node
 
 /**
  * @module
@@ -21,20 +21,29 @@
  * {@link syncPackageLockVersion} helpers are exported for reuse. Importing the
  * module does not execute the CLI.
  *
+ * Written against `node:*` only, so the same file runs on Node (the npm
+ * package's `release` bin) and on Deno (`deno run -A jsr:@marianmeres/release`).
+ *
  * @example
  * ```bash
- * deno run -A jsr:@marianmeres/release                    # defaults to patch
- * deno run -A jsr:@marianmeres/release patch
- * deno run -A jsr:@marianmeres/release minor "Added new feature"
- * deno run -A jsr:@marianmeres/release 1.2.3-rc.1         # exact version
- * deno run -A jsr:@marianmeres/release --yes patch        # skip confirmations
- * deno run -A jsr:@marianmeres/release --dry-run minor
- * deno run -A jsr:@marianmeres/release --before-commit "npm run build"
- * deno run -A jsr:@marianmeres/release --help
+ * npx @marianmeres/release                    # defaults to patch
+ * npx @marianmeres/release patch
+ * npx @marianmeres/release minor "Added new feature"
+ * npx @marianmeres/release 1.2.3-rc.1         # exact version
+ * npx @marianmeres/release --yes patch        # skip confirmations
+ * npx @marianmeres/release --dry-run minor
+ * npx @marianmeres/release --before-commit "npm run build"
+ * npx @marianmeres/release --help
+ * deno run -A jsr:@marianmeres/release patch  # same CLI, from JSR
  * ```
  *
  * Renamed from `@marianmeres/deno-release` (archived).
  */
+
+import { spawn } from "node:child_process";
+import { readFile, stat, writeFile } from "node:fs/promises";
+import process from "node:process";
+import { createInterface } from "node:readline";
 
 /** Semantic version bump type. */
 export type VersionType = "major" | "minor" | "patch";
@@ -57,6 +66,9 @@ const yellow = (s: string): string => `\x1b[33m${s}\x1b[0m`;
 const bold = (s: string): string => `\x1b[1m${s}\x1b[0m`;
 const dim = (s: string): string => `\x1b[2m${s}\x1b[0m`;
 
+/** A command and its arguments, as handed to `spawn`. */
+type Argv = [string, ...string[]];
+
 /** Result of running a shell command. */
 interface CommandResult {
 	code: number;
@@ -70,34 +82,37 @@ let VERBOSE = false;
  * Executes a shell command and returns the result.
  * @param cmd - Array of command and arguments
  */
-async function run(cmd: string[]): Promise<CommandResult> {
+function run(cmd: Argv): Promise<CommandResult> {
 	if (VERBOSE) console.log(dim(`$ ${cmd.join(" ")}`));
-	const command = new Deno.Command(cmd[0], {
-		args: cmd.slice(1),
-		stdout: "piped",
-		stderr: "piped",
+	const [file, ...args] = cmd;
+	return new Promise((resolve, reject) => {
+		const child = spawn(file, args, {
+			stdio: ["inherit", "pipe", "pipe"],
+		});
+		let stdout = "";
+		let stderr = "";
+		child.stdout.setEncoding("utf8").on("data", (s: string) => (stdout += s));
+		child.stderr.setEncoding("utf8").on("data", (s: string) => (stderr += s));
+		child.on("error", reject);
+		child.on("close", (code) => {
+			resolve({ code: code ?? 1, stdout: stdout.trim(), stderr: stderr.trim() });
+		});
 	});
-	const { code, stdout, stderr } = await command.output();
-	return {
-		code,
-		stdout: new TextDecoder().decode(stdout).trim(),
-		stderr: new TextDecoder().decode(stderr).trim(),
-	};
 }
 
 /** Run a command; on non-zero exit, log and terminate the process. */
-async function runOrExit(cmd: string[]): Promise<string> {
+async function runOrExit(cmd: Argv): Promise<string> {
 	const { code, stdout, stderr } = await run(cmd);
 	if (code !== 0) {
 		console.error(red(`Error running: ${cmd.join(" ")}`));
 		if (stderr) console.error(stderr);
-		Deno.exit(1);
+		process.exit(1);
 	}
 	return stdout;
 }
 
 /** Run a command; on non-zero exit, throw (so the caller can clean up / hint). */
-async function runOrThrow(cmd: string[]): Promise<string> {
+async function runOrThrow(cmd: Argv): Promise<string> {
 	const { code, stdout, stderr } = await run(cmd);
 	if (code !== 0) {
 		throw new Error(
@@ -108,8 +123,8 @@ async function runOrThrow(cmd: string[]): Promise<string> {
 }
 
 /** Shell invocation for a user-supplied command string. */
-function shellCommand(cmd: string): string[] {
-	return Deno.build.os === "windows" ? ["cmd", "/c", cmd] : ["sh", "-c", cmd];
+function shellCommand(cmd: string): Argv {
+	return process.platform === "win32" ? ["cmd", "/c", cmd] : ["sh", "-c", cmd];
 }
 
 /**
@@ -119,27 +134,42 @@ function shellCommand(cmd: string): string[] {
  * Unlike {@link run}, nothing is captured; the caller only learns how the
  * command ended. `env` is merged into the inherited environment.
  */
-async function runShellInherited(
+function runShellInherited(
 	cmd: string,
 	env: Record<string, string>,
-): Promise<{ code: number; signal: Deno.Signal | null }> {
-	const argv = shellCommand(cmd);
-	if (VERBOSE) console.log(dim(`$ ${argv[0]} ${argv[1]} '${cmd}'`));
-	const { code, signal } = await new Deno.Command(argv[0], {
-		args: argv.slice(1),
-		env,
-		stdin: "inherit",
-		stdout: "inherit",
-		stderr: "inherit",
-	}).output();
-	return { code, signal };
+): Promise<{ code: number; signal: string | null }> {
+	const [shell, ...args] = shellCommand(cmd);
+	if (VERBOSE) console.log(dim(`$ ${shell} ${args[0]} '${cmd}'`));
+	return new Promise((resolve, reject) => {
+		const child = spawn(shell, args, {
+			env: { ...process.env, ...env },
+			stdio: "inherit",
+		});
+		child.on("error", reject);
+		child.on("close", (code, signal) => resolve({ code: code ?? 1, signal }));
+	});
+}
+
+/**
+ * Ask a y/N question; `null` when stdin ends before an answer. The `close`
+ * listener matters: on EOF a pending question never settles, the event loop
+ * drains, and the process would exit 0 in the middle of `main`.
+ */
+function ask(question: string): Promise<string | null> {
+	const rl = createInterface({ input: process.stdin, output: process.stdout });
+	return new Promise((resolve) => {
+		rl.once("close", () => resolve(null));
+		rl.question(`${question} `, (answer) => {
+			resolve(answer);
+			rl.close();
+		});
+	});
 }
 
 /** Check whether a plain file exists at `path`. */
 async function fileExists(path: string): Promise<boolean> {
 	try {
-		const stat = await Deno.stat(path);
-		return stat.isFile;
+		return (await stat(path)).isFile();
 	} catch {
 		return false;
 	}
@@ -241,8 +271,7 @@ export function bumpVersion(current: string, type: VersionType): string {
 
 /** Detect the indentation string used by a JSON document. */
 function detectIndent(text: string): string {
-	const m = text.match(/\n([ \t]+)"/);
-	return m ? m[1] : "  ";
+	return text.match(/\n([ \t]+)"/)?.[1] ?? "  ";
 }
 
 /**
@@ -273,7 +302,7 @@ function serializeLike(originalText: string, value: unknown): string {
  *
  * @example
  * ```ts
- * const patched = syncPackageLockVersion(await Deno.readTextFile("package-lock.json"), "1.2.4");
+ * const patched = syncPackageLockVersion(await readFile("package-lock.json", "utf8"), "1.2.4");
  * ```
  */
 export function syncPackageLockVersion(
@@ -360,21 +389,20 @@ const RETIRED_FLAGS: Record<string, string> = {
 
 /** Levenshtein distance, used only for did-you-mean hints. */
 function editDistance(a: string, b: string): number {
-	const rows = Array.from(
-		{ length: a.length + 1 },
-		(_, i) => [i, ...Array(b.length).fill(0)],
-	);
-	for (let j = 0; j <= b.length; j++) rows[0][j] = j;
+	// two rolling rows of the DP matrix; `?? 0` only satisfies the index checks
+	let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
 	for (let i = 1; i <= a.length; i++) {
+		const row = [i];
 		for (let j = 1; j <= b.length; j++) {
-			rows[i][j] = Math.min(
-				rows[i - 1][j] + 1,
-				rows[i][j - 1] + 1,
-				rows[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1),
+			row[j] = Math.min(
+				(prev[j] ?? 0) + 1,
+				(row[j - 1] ?? 0) + 1,
+				(prev[j - 1] ?? 0) + (a[i - 1] === b[j - 1] ? 0 : 1),
 			);
 		}
+		prev = row;
 	}
-	return rows[a.length][b.length];
+	return prev[b.length] ?? 0;
 }
 
 /** Build the "unknown flag" error message, with a hint where we can offer one. */
@@ -469,10 +497,10 @@ function parseArgs(argv: string[]): ParsedArgs {
 		beforeCommit = cmd;
 	};
 
-	for (let i = 0; i < argv.length; i++) {
-		const a = argv[i];
+	const queue = [...argv];
+	for (let a = queue.shift(); a !== undefined; a = queue.shift()) {
 		if (a === "--") {
-			rest.push(...argv.slice(i + 1));
+			rest.push(...queue);
 			break;
 		} else if (a === "--yes" || a === "-y") skipPrompts = true;
 		else if (a === "--dry-run" || a === "-n") dryRun = true;
@@ -480,21 +508,23 @@ function parseArgs(argv: string[]): ParsedArgs {
 		else if (a === "--help" || a === "-h") help = true;
 		else if (a === "--no-push") push = false;
 		else if (a === "--tag-prefix") {
-			if (i + 1 >= argv.length) {
+			const value = queue.shift();
+			if (value === undefined) {
 				throw new Error(
 					`Option '--tag-prefix' requires a value (use '' for no prefix).`,
 				);
 			}
-			tagPrefix = argv[++i];
+			tagPrefix = value;
 		} else if (a.startsWith("--tag-prefix=")) {
 			tagPrefix = a.slice("--tag-prefix=".length);
 		} else if (a === "--before-commit") {
-			if (i + 1 >= argv.length) {
+			const value = queue.shift();
+			if (value === undefined) {
 				throw new Error(
 					`Option '--before-commit' requires a value (a shell command).`,
 				);
 			}
-			setBeforeCommit(argv[++i]);
+			setBeforeCommit(value);
 		} else if (a.startsWith("--before-commit=")) {
 			setBeforeCommit(a.slice("--before-commit=".length));
 		} else if (a.startsWith("-") && a !== "-") {
@@ -568,11 +598,11 @@ async function resolveManifest(): Promise<ResolvedManifest> {
 				`Error: No manifest found (looked for ${MANIFEST_CANDIDATES.join(", ")})`,
 			),
 		);
-		Deno.exit(1);
+		process.exit(1);
 	}
 
 	for (const path of candidates) {
-		const text = await Deno.readTextFile(path);
+		const text = await readFile(path, "utf8");
 		let data: Record<string, unknown>;
 		try {
 			data = JSON.parse(text);
@@ -580,7 +610,7 @@ async function resolveManifest(): Promise<ResolvedManifest> {
 			console.error(
 				red(`Error: Failed to parse ${path}: ${(e as Error).message}`),
 			);
-			Deno.exit(1);
+			process.exit(1);
 		}
 		const version = data.version;
 		if (typeof version !== "string") continue;
@@ -592,7 +622,7 @@ async function resolveManifest(): Promise<ResolvedManifest> {
 			`Error: No string 'version' field found in ${candidates.join(" / ")}`,
 		),
 	);
-	Deno.exit(1);
+	process.exit(1);
 }
 
 /**
@@ -616,13 +646,13 @@ async function resolveManifest(): Promise<ResolvedManifest> {
  *    tree — then creates the commit and annotated tag
  * 10. Pushes the commit and the new tag to `origin`
  */
-async function main(): Promise<void> {
+export async function main(): Promise<void> {
 	let args: ParsedArgs;
 	try {
-		args = parseArgs(Deno.args);
+		args = parseArgs(process.argv.slice(2));
 	} catch (e) {
 		console.error(red(`Error: ${(e as Error).message}`));
-		Deno.exit(1);
+		process.exit(1);
 	}
 	const {
 		spec,
@@ -649,7 +679,7 @@ async function main(): Promise<void> {
 	]);
 	if (gitCheck !== 0) {
 		console.error(red("Error: Not in a git repository"));
-		Deno.exit(1);
+		process.exit(1);
 	}
 
 	// Locate & parse manifest
@@ -686,7 +716,7 @@ async function main(): Promise<void> {
 			);
 			const { stdout: shortStatus } = await run(["git", "status", "--short"]);
 			console.log(shortStatus);
-			Deno.exit(1);
+			process.exit(1);
 		}
 	}
 
@@ -704,9 +734,9 @@ async function main(): Promise<void> {
 			),
 		);
 		if (!skipPrompts && !dryRun) {
-			const answer = prompt("Continue anyway? (y/N):");
+			const answer = await ask("Continue anyway? (y/N):");
 			if (answer?.toLowerCase() !== "y") {
-				Deno.exit(1);
+				process.exit(1);
 			}
 		}
 	}
@@ -728,14 +758,14 @@ async function main(): Promise<void> {
 			console.error(
 				red(`Error: ${newVersion} is already the current version.`),
 			);
-			Deno.exit(1);
+			process.exit(1);
 		}
 	} else {
 		try {
 			newVersion = bumpVersion(currentVersion, spec.type);
 		} catch (e) {
 			console.error(red(`Error: ${(e as Error).message}`));
-			Deno.exit(1);
+			process.exit(1);
 		}
 	}
 	const tagName = `${tagPrefix}${newVersion}`;
@@ -752,7 +782,7 @@ async function main(): Promise<void> {
 	]);
 	if (tagExistsLocal === 0) {
 		console.error(red(`Error: Tag ${tagName} already exists locally.`));
-		Deno.exit(1);
+		process.exit(1);
 	}
 
 	// An 'origin' remote must be configured (we push to it later)
@@ -769,7 +799,7 @@ async function main(): Promise<void> {
 			console.error(
 				yellow("       (use --no-push to commit and tag without pushing)"),
 			);
-			Deno.exit(1);
+			process.exit(1);
 		}
 	}
 
@@ -793,7 +823,7 @@ async function main(): Promise<void> {
 				),
 			);
 		} else {
-			lockText = await Deno.readTextFile(NPM_LOCKFILE);
+			lockText = await readFile(NPM_LOCKFILE, "utf8");
 			try {
 				JSON.parse(lockText);
 			} catch (e) {
@@ -802,7 +832,7 @@ async function main(): Promise<void> {
 						(e as Error).message
 					}`),
 				);
-				Deno.exit(1);
+				process.exit(1);
 			}
 			lockPath = NPM_LOCKFILE;
 		}
@@ -846,10 +876,10 @@ async function main(): Promise<void> {
 	}
 
 	if (!skipPrompts) {
-		const answer = prompt("Continue? (y/N):");
+		const answer = await ask("Continue? (y/N):");
 		if (answer?.toLowerCase() !== "y") {
 			console.log("Release cancelled.");
-			Deno.exit(0);
+			process.exit(0);
 		}
 	}
 
@@ -857,7 +887,7 @@ async function main(): Promise<void> {
 
 	console.log(`Setting version to ${newVersion}...`);
 	manifest.version = newVersion;
-	await Deno.writeTextFile(manifestPath, serializeLike(manifestText, manifest));
+	await writeFile(manifestPath, serializeLike(manifestText, manifest));
 
 	let lockWritten = false;
 	if (lockPath) {
@@ -867,7 +897,7 @@ async function main(): Promise<void> {
 				yellow(`Warning: no root 'version' field in ${lockPath} — left as is.`),
 			);
 		} else {
-			await Deno.writeTextFile(lockPath, patched);
+			await writeFile(lockPath, patched);
 			lockWritten = true;
 		}
 	}
@@ -893,8 +923,8 @@ async function main(): Promise<void> {
 				? [manifestPath, lockPath]
 				: [manifestPath];
 			try {
-				await Deno.writeTextFile(manifestPath, manifestText);
-				if (lockWritten && lockPath) await Deno.writeTextFile(lockPath, lockText);
+				await writeFile(manifestPath, manifestText);
+				if (lockWritten && lockPath) await writeFile(lockPath, lockText);
 				console.error(`Restored ${written.join(" and ")}.`);
 			} catch (e) {
 				console.error(
@@ -913,7 +943,7 @@ async function main(): Promise<void> {
 			console.error(
 				"Files the command created or changed were left alone — see `git status`.",
 			);
-			Deno.exit(1);
+			process.exit(1);
 		}
 	}
 
@@ -960,7 +990,7 @@ async function main(): Promise<void> {
 				}   # discard the version bump if it was not yet committed`,
 			);
 		}
-		Deno.exit(1);
+		process.exit(1);
 	}
 
 	console.log(green(`Release complete! New version: ${tagName}`));

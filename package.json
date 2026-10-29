@@ -1,0 +1,65 @@
+{
+  "name": "@marianmeres/release",
+  "version": "2.1.0",
+  "description": "Opinionated release CLI: bump the version in package.json / jsr.json / deno.json, commit, tag, push.",
+  "license": "MIT",
+  "author": "Marian Meres",
+  "type": "module",
+  "packageManager": "pnpm@12.16.1",
+  "engines": {
+    "node": ">=24.12"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "bin": {
+    "release": "./dist/bin.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/release.d.ts",
+      "default": "./dist/release.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/marianmeres/release.git"
+  },
+  "bugs": {
+    "url": "https://github.com/marianmeres/release/issues"
+  },
+  "homepage": "https://github.com/marianmeres/release#readme",
+  "keywords": [
+    "release",
+    "version",
+    "semver",
+    "git",
+    "tag",
+    "cli"
+  ],
+  "scripts": {
+    "build": "pnpm run clean && tsc -p tsconfig.build.json",
+    "clean": "rm -rf dist",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check .",
+    "format": "biome check --write .",
+    "test": "node --test \"tests/**/*.test.ts\"",
+    "test:watch": "node --test --watch \"tests/**/*.test.ts\"",
+    "test:deno": "CLI_RUNTIME=deno node --test \"tests/**/*.e2e.test.ts\"",
+    "ci": "pnpm run typecheck && pnpm run lint && pnpm test",
+    "prepublishOnly": "pnpm run ci && pnpm run build",
+    "release": "node src/release.ts",
+    "publish:jsr": "pnpm run test:deno && deno publish --no-check --set-version \"$npm_package_version\"",
+    "publish:all": "pnpm publish && pnpm run publish:jsr",
+    "rp": "pnpm run release -y && pnpm run publish:all",
+    "rpm": "pnpm run release minor -y && pnpm run publish:all"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.6.3",
+    "@types/node": "^26.6.5",
+    "typescript": "^7.0.2"
+  }
+}

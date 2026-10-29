@@ -1,9 +1,13 @@
 # @marianmeres/release
 
+[![NPM](https://img.shields.io/npm/v/@marianmeres/release)](https://www.npmjs.com/package/@marianmeres/release)
+[![JSR](https://jsr.io/badges/@marianmeres/release)](https://jsr.io/@marianmeres/release)
+[![License](https://img.shields.io/npm/l/@marianmeres/release)](LICENSE)
+
 An opinionated, interactive CLI tool for releasing Deno / JSR / npm projects.
 Bumps the version in `deno.json` (or `jsr.json`, or `package.json`), creates an
 annotated git tag, and pushes the commit together with the new tag to the remote
-repository.
+repository. Runs on Node (from npm) and on Deno (from JSR).
 
 > Renamed from `@marianmeres/deno-release` once the tool learned to release npm
 > projects too. Migrating is a one-line change; see [Legacy](#legacy).
@@ -49,34 +53,67 @@ release [<major|minor|patch|X.Y.Z[-pre]>] [message...] [options]
 
 Options can appear anywhere in the argument list.
 
-### Via `deno run`
+### Via `npx`
+
+Needs Node 24.12+. `pnpm dlx @marianmeres/release` works the same way.
 
 ```bash
 # Patch release (1.0.0 -> 1.0.1); patch is the default
-deno run -A jsr:@marianmeres/release patch
+npx @marianmeres/release patch
 
 # Minor / major
-deno run -A jsr:@marianmeres/release minor
-deno run -A jsr:@marianmeres/release major
+npx @marianmeres/release minor
+npx @marianmeres/release major
 
 # Exact version, including prereleases
-deno run -A jsr:@marianmeres/release 1.2.3
-deno run -A jsr:@marianmeres/release 2.0.0-rc.1
+npx @marianmeres/release 1.2.3
+npx @marianmeres/release 2.0.0-rc.1
 
 # With custom message
-deno run -A jsr:@marianmeres/release patch "Fixed critical bug"
+npx @marianmeres/release patch "Fixed critical bug"
 
 # Skip confirmation prompts (useful for CI/CD)
-deno run -A jsr:@marianmeres/release --yes patch
+npx @marianmeres/release --yes patch
 
 # Preview without making changes
-deno run -A jsr:@marianmeres/release --dry-run minor
+npx @marianmeres/release --dry-run minor
 
 # Unprefixed tag, and stop before pushing
-deno run -A jsr:@marianmeres/release patch --tag-prefix "" --no-push
+npx @marianmeres/release patch --tag-prefix "" --no-push
 
 # Rebuild a committed artifact from the bumped manifest, inside the release commit
-deno run -A jsr:@marianmeres/release minor --before-commit "npm run build"
+npx @marianmeres/release minor --before-commit "npm run build"
+```
+
+### As a project dependency
+
+Pinned by your lockfile, and no download on each run:
+
+```bash
+pnpm add -D @marianmeres/release    # or: npm install -D @marianmeres/release
+```
+
+```json
+{
+	"scripts": {
+		"release": "release"
+	}
+}
+```
+
+```bash
+pnpm run release patch
+pnpm run release minor "Added new feature"
+npm run release -- --dry-run minor   # npm needs the `--`
+```
+
+### Via `deno run`
+
+The same CLI, from JSR:
+
+```bash
+deno run -A jsr:@marianmeres/release patch
+deno run -A jsr:@marianmeres/release --dry-run minor
 ```
 
 ### As a Deno task
@@ -98,26 +135,15 @@ deno task release --dry-run minor
 ### Install globally
 
 ```bash
+npm install -g @marianmeres/release
+# or
 deno install -A -g -n release jsr:@marianmeres/release
 ```
 
 ### npm projects
 
-A repo with only a `package.json` works the same way — there is nothing to
-configure:
-
-```json
-{
-	"scripts": {
-		"release": "deno run -A jsr:@marianmeres/release"
-	}
-}
-```
-
-```bash
-npm run release -- patch
-npm run release -- minor "Added new feature"
-```
+A repo with only a `package.json` needs nothing configured; see
+[As a project dependency](#as-a-project-dependency).
 
 The tool never publishes to npm; it only bumps, commits, tags and pushes, so
 `"private": true` packages are fine.
@@ -128,7 +154,7 @@ tag on the remote:
 ```json
 {
 	"scripts": {
-		"rp": "npm run build && deno run -A jsr:@marianmeres/release patch --no-push -y && npm publish && git push --follow-tags"
+		"rp": "npm run build && release patch --no-push -y && npm publish && git push --follow-tags"
 	}
 }
 ```
@@ -199,16 +225,16 @@ with the manifest** (`git add -A`, honouring `.gitignore`):
 
 ```json
 {
-	"tasks": {
-		"build": "deno run -A scripts/build.ts",
-		"release": "deno run -A jsr:@marianmeres/release --before-commit \"deno task build\""
+	"scripts": {
+		"build": "vite build",
+		"release": "release --before-commit \"npm run build\""
 	}
 }
 ```
 
 ```bash
-deno task release patch
-deno task release minor -y
+npm run release -- patch
+npm run release -- minor -y
 ```
 
 The command inherits the terminal, runs in the directory the manifest was
@@ -243,7 +269,7 @@ module has **no side effects** — the CLI only runs when the file is executed
 directly.
 
 ```ts
-import { bumpVersion, type VersionType } from "jsr:@marianmeres/release";
+import { bumpVersion, type VersionType } from "@marianmeres/release";
 
 bumpVersion("1.2.3", "patch"); // "1.2.4"
 bumpVersion("1.2.3", "minor"); // "1.3.0"
@@ -259,7 +285,7 @@ try {
 ```
 
 ```ts
-import { syncPackageLockVersion } from "jsr:@marianmeres/release";
+import { syncPackageLockVersion } from "@marianmeres/release";
 
 // returns the patched document text (or the input unchanged if the lockfile
 // carries no root version); throws if the input is not valid JSON
@@ -298,9 +324,10 @@ rolling back the local state.
 ## Legacy
 
 Everything before 2.0.0 is archived and receives no further releases: the JSR
-package `@marianmeres/deno-release` (frozen at 1.5.0) and, before that, an npm
-CLI that also happened to be called `@marianmeres/release`. Neither is related
-to this package beyond lineage.
+package `@marianmeres/deno-release` (frozen at 1.5.0) and, before that, the npm
+CLI `@marianmeres/release` 1.x. From 2.2.0 this package is published to npm
+under that same name; the 1.x versions there stay deprecated, and `npx
+@marianmeres/release` now runs this tool.
 
 Migrating off `deno-release` is a one-line change:
 
@@ -322,6 +349,16 @@ Old invocations that 2.0.0 will now reject rather than misinterpret:
 Note that changing the specifier rewrites `deno.lock`, which then trips the
 clean-tree check — commit `deno.json` and `deno.lock` together first.
 
+## Development
+
+```bash
+pnpm install
+pnpm run ci         # typecheck + Biome + tests (the CLI runs on Node, from source)
+pnpm run test:deno  # the e2e suite with the CLI on Deno, as JSR consumers run it
+```
+
+The full CLI behaviour is specified in [docs/cli.md](docs/cli.md).
+
 ## License
 
-MIT
+[MIT](LICENSE)

@@ -1,0 +1,7 @@
+{
+  "name": "@marianmeres/release",
+  "exports": "./src/release.ts",
+  "publish": {
+    "include": ["src/release.ts", "README.md", "LICENSE"]
+  }
+}

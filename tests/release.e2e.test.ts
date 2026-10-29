@@ -1,46 +1,66 @@
 // End-to-end tests: run the CLI inside a throwaway git repo with a local bare
 // "origin", so the full mutate + commit + tag + push path is exercised.
+//
+// The CLI runs on Node from source. `CLI_RUNTIME=deno` runs it on Deno instead
+// (`pnpm run test:deno`), which is how the JSR consumers execute it.
 
-const CLI = new URL("./release.ts", import.meta.url).pathname;
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import process from "node:process";
+import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 
-function assertEquals(actual: unknown, expected: unknown, msg?: string): void {
-	const a = JSON.stringify(actual);
-	const b = JSON.stringify(expected);
-	if (a !== b) {
-		throw new Error(`${msg ? msg + ": " : ""}expected ${b}, got ${a}`);
-	}
+const CLI = fileURLToPath(new URL("../src/release.ts", import.meta.url));
+
+/** How the CLI is started: Node by default, Deno under `CLI_RUNTIME=deno`. */
+const CLI_ARGV: [string, ...string[]] =
+	process.env.CLI_RUNTIME === "deno" ? ["deno", "run", "-A", CLI] : [process.execPath, CLI];
+
+/** Spawn `file args` in `cwd`; resolves with the exit code and captured output. */
+function exec(
+	cwd: string,
+	file: string,
+	args: string[],
+): Promise<{ code: number; stdout: string; stderr: string }> {
+	return new Promise((resolve, reject) => {
+		const child = spawn(file, args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+		let stdout = "";
+		let stderr = "";
+		child.stdout.setEncoding("utf8").on("data", (s: string) => (stdout += s));
+		child.stderr.setEncoding("utf8").on("data", (s: string) => (stderr += s));
+		child.on("error", reject);
+		child.on("close", (code) => resolve({ code: code ?? 1, stdout, stderr }));
+	});
 }
 
-function assert(cond: boolean, msg: string): void {
-	if (!cond) throw new Error(msg);
+/** Run git in `cwd`; throws on a non-zero exit, returns trimmed stdout. */
+async function gitOut(cwd: string, ...args: string[]): Promise<string> {
+	const { code, stdout, stderr } = await exec(cwd, "git", args);
+	if (code !== 0) throw new Error(`git ${args.join(" ")} failed: ${stderr}`);
+	return stdout.trim();
 }
 
 async function git(cwd: string, ...args: string[]): Promise<void> {
-	const { code, stderr } = await new Deno.Command("git", {
-		args,
-		cwd,
-		stdout: "piped",
-		stderr: "piped",
-	}).output();
-	if (code !== 0) {
-		throw new Error(
-			`git ${args.join(" ")} failed: ${new TextDecoder().decode(stderr)}`,
-		);
-	}
+	await gitOut(cwd, ...args);
 }
+
+const read = (path: string): Promise<string> => readFile(path, "utf8");
 
 /** Create a temp git repo (with a bare origin) seeded with `files`. */
 async function makeRepo(files: Record<string, string>): Promise<string> {
-	const root = await Deno.makeTempDir({ prefix: "deno-release-test-" });
+	const root = await mkdtemp(join(tmpdir(), "release-test-"));
 	const repo = `${root}/repo`;
 	const remote = `${root}/remote.git`;
-	await Deno.mkdir(repo);
+	await mkdir(repo);
 	await git(root, "init", "--bare", remote);
 	await git(repo, "init", "-b", "main");
 	await git(repo, "config", "user.email", "test@example.com");
 	await git(repo, "config", "user.name", "Test");
 	for (const [name, content] of Object.entries(files)) {
-		await Deno.writeTextFile(`${repo}/${name}`, content);
+		await writeFile(`${repo}/${name}`, content);
 	}
 	await git(repo, "add", ".");
 	await git(repo, "commit", "-m", "init");
@@ -53,14 +73,9 @@ async function release(
 	cwd: string,
 	...args: string[]
 ): Promise<{ code: number; out: string }> {
-	const { code, stdout, stderr } = await new Deno.Command(Deno.execPath(), {
-		args: ["run", "-A", CLI, ...args],
-		cwd,
-		stdout: "piped",
-		stderr: "piped",
-	}).output();
-	const dec = new TextDecoder();
-	return { code, out: dec.decode(stdout) + dec.decode(stderr) };
+	const [file, ...pre] = CLI_ARGV;
+	const { code, stdout, stderr } = await exec(cwd, file, [...pre, ...args]);
+	return { code, out: stdout + stderr };
 }
 
 const PKG_TABS =
@@ -68,14 +83,14 @@ const PKG_TABS =
 const LOCK_TABS =
 	`{\n\t"name": "@scope/app",\n\t"version": "2.0.1",\n\t"lockfileVersion": 3,\n\t"packages": {\n\t\t"": {\n\t\t\t"name": "@scope/app",\n\t\t\t"version": "2.0.1"\n\t\t}\n\t}\n}\n`;
 
-Deno.test("resolution order: deno.json wins over jsr.json wins over package.json", async () => {
+test("resolution order: deno.json wins over jsr.json wins over package.json", async () => {
 	const repo = await makeRepo({
 		"deno.json": `{\n  "version": "1.0.0"\n}\n`,
 		"jsr.json": `{\n  "version": "2.0.0"\n}\n`,
 		"package.json": PKG_TABS,
 	});
 	const { code, out } = await release(repo, "--dry-run", "patch");
-	assertEquals(code, 0, out);
+	assert.deepEqual(code, 0, out);
 	assert(/Manifest:\s+deno\.json/.test(out), `deno.json not chosen:\n${out}`);
 	assert(out.includes("1.0.1"), `wrong version computed:\n${out}`);
 	assert(
@@ -84,113 +99,99 @@ Deno.test("resolution order: deno.json wins over jsr.json wins over package.json
 	);
 });
 
-Deno.test("resolution skips a version-less deno.json in favour of package.json", async () => {
+test("resolution skips a version-less deno.json in favour of package.json", async () => {
 	const repo = await makeRepo({
 		"deno.json": `{\n  "tasks": { "dev": "vite" }\n}\n`,
 		"package.json": PKG_TABS,
 	});
 	const { code, out } = await release(repo, "--dry-run", "minor");
-	assertEquals(code, 0, out);
+	assert.deepEqual(code, 0, out);
 	assert(/Manifest:\s+package\.json/.test(out), `package.json not chosen:\n${out}`);
 	assert(out.includes("2.1.0"), `wrong version computed:\n${out}`);
 });
 
-Deno.test("npm release bumps package.json + lockfile, preserving tabs", async () => {
+test("npm release bumps package.json + lockfile, preserving tabs", async () => {
 	const repo = await makeRepo({
 		"package.json": PKG_TABS,
 		"package-lock.json": LOCK_TABS,
 	});
 	const { code, out } = await release(repo, "--yes", "patch");
-	assertEquals(code, 0, out);
+	assert.deepEqual(code, 0, out);
 
-	const pkgText = await Deno.readTextFile(`${repo}/package.json`);
-	assertEquals(JSON.parse(pkgText).version, "2.0.2");
-	assertEquals(JSON.parse(pkgText).private, true, "unrelated fields survive");
+	const pkgText = await read(`${repo}/package.json`);
+	assert.deepEqual(JSON.parse(pkgText).version, "2.0.2");
+	assert.deepEqual(JSON.parse(pkgText).private, true, "unrelated fields survive");
 	assert(pkgText.includes('\n\t"name"'), `tabs lost in package.json:\n${pkgText}`);
 	assert(pkgText.endsWith("}\n"), "trailing newline lost in package.json");
 
-	const lockText = await Deno.readTextFile(`${repo}/package-lock.json`);
+	const lockText = await read(`${repo}/package-lock.json`);
 	const lock = JSON.parse(lockText);
-	assertEquals(lock.version, "2.0.2");
-	assertEquals(lock.packages[""].version, "2.0.2");
+	assert.deepEqual(lock.version, "2.0.2");
+	assert.deepEqual(lock.packages[""].version, "2.0.2");
 	assert(lockText.includes('\n\t"name"'), `tabs lost in lockfile:\n${lockText}`);
 
 	// tree is clean (both files were committed) and the tag exists
-	const status = await new Deno.Command("git", {
-		args: ["status", "--porcelain"],
-		cwd: repo,
-		stdout: "piped",
-	}).output();
-	assertEquals(new TextDecoder().decode(status.stdout).trim(), "");
-	const tag = await new Deno.Command("git", {
-		args: ["rev-parse", "-q", "--verify", "refs/tags/v2.0.2"],
-		cwd: repo,
-		stdout: "piped",
-		stderr: "piped",
-	}).output();
-	assertEquals(tag.code, 0, "tag v2.0.2 was not created");
+	assert.deepEqual(await gitOut(repo, "status", "--porcelain"), "");
+	const tag = await exec(repo, "git", ["rev-parse", "-q", "--verify", "refs/tags/v2.0.2"]);
+	assert.deepEqual(tag.code, 0, "tag v2.0.2 was not created");
 });
 
-Deno.test("unparseable lockfile fails pre-flight with nothing mutated", async () => {
+test("unparseable lockfile fails pre-flight with nothing mutated", async () => {
 	const repo = await makeRepo({
 		"package.json": PKG_TABS,
 		"package-lock.json": `{ "version": "2.0.1", oops }\n`,
 	});
 	const { code, out } = await release(repo, "--yes", "patch");
-	assertEquals(code, 1, out);
+	assert.deepEqual(code, 1, out);
 	assert(out.includes("package-lock.json"), `unhelpful error:\n${out}`);
 
-	assertEquals(
-		JSON.parse(await Deno.readTextFile(`${repo}/package.json`)).version,
+	assert.deepEqual(
+		JSON.parse(await read(`${repo}/package.json`)).version,
 		"2.0.1",
 		"manifest was mutated despite pre-flight failure",
 	);
-	const log = await new Deno.Command("git", {
-		args: ["log", "--oneline"],
-		cwd: repo,
-		stdout: "piped",
-	}).output();
-	assertEquals(
-		new TextDecoder().decode(log.stdout).trim().split("\n").length,
+	const log = await gitOut(repo, "log", "--oneline");
+	assert.deepEqual(
+		log.split("\n").length,
 		1,
 		"a commit was created despite pre-flight failure",
 	);
 });
 
-Deno.test("absent lockfile is a silent no-op", async () => {
+test("absent lockfile is a silent no-op", async () => {
 	const repo = await makeRepo({ "package.json": PKG_TABS });
 	const { code, out } = await release(repo, "--yes", "patch");
-	assertEquals(code, 0, out);
+	assert.deepEqual(code, 0, out);
 	assert(!out.includes("package-lock.json"), `unexpected lockfile chatter:\n${out}`);
-	assertEquals(
-		JSON.parse(await Deno.readTextFile(`${repo}/package.json`)).version,
+	assert.deepEqual(
+		JSON.parse(await read(`${repo}/package.json`)).version,
 		"2.0.2",
 	);
 });
 
-Deno.test("deno.json release leaves package-lock.json alone", async () => {
+test("deno.json release leaves package-lock.json alone", async () => {
 	const repo = await makeRepo({
 		"deno.json": `{\n  "version": "1.0.0"\n}\n`,
 		"package.json": PKG_TABS,
 		"package-lock.json": LOCK_TABS,
 	});
 	const { code, out } = await release(repo, "--yes", "patch");
-	assertEquals(code, 0, out);
-	assertEquals(await Deno.readTextFile(`${repo}/package-lock.json`), LOCK_TABS);
-	assertEquals(await Deno.readTextFile(`${repo}/package.json`), PKG_TABS);
+	assert.deepEqual(code, 0, out);
+	assert.deepEqual(await read(`${repo}/package-lock.json`), LOCK_TABS);
+	assert.deepEqual(await read(`${repo}/package.json`), PKG_TABS);
 });
 
-Deno.test("git-ignored lockfile is warned about, not staged", async () => {
+test("git-ignored lockfile is warned about, not staged", async () => {
 	const repo = await makeRepo({
 		"package.json": PKG_TABS,
 		".gitignore": "package-lock.json\n",
 	});
-	await Deno.writeTextFile(`${repo}/package-lock.json`, LOCK_TABS);
+	await writeFile(`${repo}/package-lock.json`, LOCK_TABS);
 	const { code, out } = await release(repo, "--yes", "patch");
-	assertEquals(code, 0, out);
+	assert.deepEqual(code, 0, out);
 	assert(out.includes("git-ignored"), `missing warning:\n${out}`);
-	assertEquals(
-		await Deno.readTextFile(`${repo}/package-lock.json`),
+	assert.deepEqual(
+		await read(`${repo}/package-lock.json`),
 		LOCK_TABS,
 		"ignored lockfile should be left untouched",
 	);
@@ -203,157 +204,137 @@ Deno.test("git-ignored lockfile is warned about, not staged", async () => {
 
 /** Version currently in package.json + the repo's commit count. */
 async function state(repo: string): Promise<{ version: string; commits: number }> {
-	const version = JSON.parse(await Deno.readTextFile(`${repo}/package.json`)).version;
-	const log = await new Deno.Command("git", {
-		args: ["rev-list", "--count", "HEAD"],
-		cwd: repo,
-		stdout: "piped",
-	}).output();
-	return { version, commits: Number(new TextDecoder().decode(log.stdout).trim()) };
+	const version = JSON.parse(await read(`${repo}/package.json`)).version;
+	return { version, commits: Number(await gitOut(repo, "rev-list", "--count", "HEAD")) };
 }
 
 async function tagsIn(dir: string): Promise<string[]> {
-	const { stdout } = await new Deno.Command("git", {
-		args: ["tag", "-l"],
-		cwd: dir,
-		stdout: "piped",
-	}).output();
-	return new TextDecoder().decode(stdout).trim().split("\n").filter(Boolean);
+	return (await gitOut(dir, "tag", "-l")).split("\n").filter(Boolean);
 }
 
-Deno.test("unknown option is a hard error, nothing mutated", async () => {
+test("unknown option is a hard error, nothing mutated", async () => {
 	const repo = await makeRepo({ "package.json": PKG_TABS });
 	const before = await state(repo);
 	const { code, out } = await release(repo, "--yes", "--bogus");
-	assertEquals(code, 1, out);
+	assert.deepEqual(code, 1, out);
 	assert(out.includes("Unknown option '--bogus'"), `unhelpful error:\n${out}`);
-	assertEquals(await state(repo), before, "state changed despite a rejected flag");
+	assert.deepEqual(await state(repo), before, "state changed despite a rejected flag");
 });
 
-Deno.test("unknown option offers a did-you-mean", async () => {
+test("unknown option offers a did-you-mean", async () => {
 	const repo = await makeRepo({ "package.json": PKG_TABS });
 	const { code, out } = await release(repo, "--dry-runn");
-	assertEquals(code, 1, out);
+	assert.deepEqual(code, 1, out);
 	assert(out.includes("--dry-run"), `no suggestion offered:\n${out}`);
 });
 
-Deno.test("retired 1.x flags explain themselves instead of becoming message text", async () => {
+test("retired 1.x flags explain themselves instead of becoming message text", async () => {
 	const repo = await makeRepo({ "package.json": PKG_TABS });
 	const before = await state(repo);
 
 	// the dangerous one: -v meant *version* in the legacy npm CLI, *verbose* here
 	const v = await release(repo, "--yes", "-v", "1.2.3");
-	assertEquals(v.code, 1, v.out);
+	assert.deepEqual(v.code, 1, v.out);
 	assert(v.out.includes("--verbose"), `no --verbose hint:\n${v.out}`);
 	assert(v.out.includes("positional"), `no positional hint:\n${v.out}`);
 
 	for (const flag of ["-d", "--suffix", "--git-tag-prefix"]) {
 		const r = await release(repo, "--yes", flag, "x");
-		assertEquals(r.code, 1, `${flag} was not rejected:\n${r.out}`);
+		assert.deepEqual(r.code, 1, `${flag} was not rejected:\n${r.out}`);
 	}
-	assertEquals(await state(repo), before, "a retired flag mutated the repo");
+	assert.deepEqual(await state(repo), before, "a retired flag mutated the repo");
 });
 
-Deno.test("--help prints usage and changes nothing", async () => {
+test("--help prints usage and changes nothing", async () => {
 	const repo = await makeRepo({ "package.json": PKG_TABS });
 	const before = await state(repo);
 	const { code, out } = await release(repo, "--help");
-	assertEquals(code, 0, out);
+	assert.deepEqual(code, 0, out);
 	assert(out.includes("Usage:"), `no usage block:\n${out}`);
 	assert(out.includes("--tag-prefix"), `usage omits --tag-prefix:\n${out}`);
 	assert(out.includes("--before-commit"), `usage omits --before-commit:\n${out}`);
-	assertEquals(await state(repo), before);
+	assert.deepEqual(await state(repo), before);
 });
 
-Deno.test("-- passes the rest through as message text", async () => {
+test("-- passes the rest through as message text", async () => {
 	const repo = await makeRepo({ "package.json": PKG_TABS });
 	const { code, out } = await release(repo, "--yes", "patch", "--", "--bogus", "note");
-	assertEquals(code, 0, out);
-	const { stdout } = await new Deno.Command("git", {
-		args: ["log", "-1", "--pretty=%s"],
-		cwd: repo,
-		stdout: "piped",
-	}).output();
-	assertEquals(
-		new TextDecoder().decode(stdout).trim(),
+	assert.deepEqual(code, 0, out);
+	assert.deepEqual(
+		await gitOut(repo, "log", "-1", "--pretty=%s"),
 		"Release: 2.0.2 (--bogus note)",
 	);
 });
 
-Deno.test("exact version is used verbatim", async () => {
+test("exact version is used verbatim", async () => {
 	const repo = await makeRepo({ "package.json": PKG_TABS });
 	const { code, out } = await release(repo, "--yes", "3.1.4", "jumped ahead");
-	assertEquals(code, 0, out);
-	assertEquals((await state(repo)).version, "3.1.4");
+	assert.deepEqual(code, 0, out);
+	assert.deepEqual((await state(repo)).version, "3.1.4");
 	assert((await tagsIn(repo)).includes("v3.1.4"), "tag v3.1.4 missing");
 });
 
-Deno.test("exact prerelease version is accepted, and a later bump promotes it", async () => {
+test("exact prerelease version is accepted, and a later bump promotes it", async () => {
 	const repo = await makeRepo({ "package.json": PKG_TABS });
 	const rc = await release(repo, "--yes", "3.0.0-rc.1");
-	assertEquals(rc.code, 0, rc.out);
-	assertEquals((await state(repo)).version, "3.0.0-rc.1");
+	assert.deepEqual(rc.code, 0, rc.out);
+	assert.deepEqual((await state(repo)).version, "3.0.0-rc.1");
 	assert((await tagsIn(repo)).includes("v3.0.0-rc.1"), "prerelease tag missing");
 
 	// the reason bumpVersion understands prereleases: otherwise the repo would
 	// be stuck here, with every keyword bump throwing "Invalid version format"
 	const promoted = await release(repo, "--yes", "patch");
-	assertEquals(promoted.code, 0, promoted.out);
-	assertEquals((await state(repo)).version, "3.0.0");
+	assert.deepEqual(promoted.code, 0, promoted.out);
+	assert.deepEqual((await state(repo)).version, "3.0.0");
 });
 
-Deno.test("exact version equal to the current one is refused", async () => {
+test("exact version equal to the current one is refused", async () => {
 	const repo = await makeRepo({ "package.json": PKG_TABS });
 	const { code, out } = await release(repo, "--yes", "2.0.1");
-	assertEquals(code, 1, out);
+	assert.deepEqual(code, 1, out);
 	assert(out.includes("already the current version"), `unclear error:\n${out}`);
 });
 
-Deno.test('--tag-prefix "" tags without a prefix', async () => {
+test('--tag-prefix "" tags without a prefix', async () => {
 	const repo = await makeRepo({ "package.json": PKG_TABS });
 	const { code, out } = await release(repo, "--yes", "patch", "--tag-prefix", "");
-	assertEquals(code, 0, out);
+	assert.deepEqual(code, 0, out);
 	const tags = await tagsIn(repo);
 	assert(tags.includes("2.0.2"), `expected unprefixed tag, got ${tags}`);
 	assert(!tags.includes("v2.0.2"), "prefixed tag should not exist");
 });
 
-Deno.test("--tag-prefix without a value is an error", async () => {
+test("--tag-prefix without a value is an error", async () => {
 	const repo = await makeRepo({ "package.json": PKG_TABS });
 	const { code, out } = await release(repo, "--yes", "--tag-prefix");
-	assertEquals(code, 1, out);
+	assert.deepEqual(code, 1, out);
 	assert(out.includes("requires a value"), `unclear error:\n${out}`);
 });
 
-Deno.test("--no-push commits and tags locally, leaving the remote untouched", async () => {
+test("--no-push commits and tags locally, leaving the remote untouched", async () => {
 	const repo = await makeRepo({ "package.json": PKG_TABS });
 	const remote = `${repo}/../remote.git`;
 	const { code, out } = await release(repo, "--yes", "patch", "--no-push");
-	assertEquals(code, 0, out);
+	assert.deepEqual(code, 0, out);
 
-	assertEquals((await state(repo)).version, "2.0.2");
+	assert.deepEqual((await state(repo)).version, "2.0.2");
 	assert((await tagsIn(repo)).includes("v2.0.2"), "local tag missing");
-	assertEquals(await tagsIn(remote), [], "remote received tags despite --no-push");
+	assert.deepEqual(await tagsIn(remote), [], "remote received tags despite --no-push");
 
-	const behind = await new Deno.Command("git", {
-		args: ["rev-list", "--count", "origin/main..HEAD"],
-		cwd: repo,
-		stdout: "piped",
-	}).output();
-	assertEquals(
-		new TextDecoder().decode(behind.stdout).trim(),
+	assert.deepEqual(
+		await gitOut(repo, "rev-list", "--count", "origin/main..HEAD"),
 		"1",
 		"commit should be unpushed",
 	);
 	assert(out.includes("Not pushed"), `no reminder printed:\n${out}`);
 });
 
-Deno.test("--no-push works without an origin remote at all", async () => {
+test("--no-push works without an origin remote at all", async () => {
 	const repo = await makeRepo({ "package.json": PKG_TABS });
 	await git(repo, "remote", "remove", "origin");
 	const { code, out } = await release(repo, "--yes", "patch", "--no-push");
-	assertEquals(code, 0, out);
-	assertEquals((await state(repo)).version, "2.0.2");
+	assert.deepEqual(code, 0, out);
+	assert.deepEqual((await state(repo)).version, "2.0.2");
 });
 
 // ---------------------------------------------------------------------------
@@ -361,21 +342,6 @@ Deno.test("--no-push works without an origin remote at all", async () => {
 // release commit, for repos that commit build artifacts embedding the version.
 // Without it such an artifact is always built one commit *after* the tag.
 // ---------------------------------------------------------------------------
-
-async function gitOut(cwd: string, ...args: string[]): Promise<string> {
-	const { code, stdout, stderr } = await new Deno.Command("git", {
-		args,
-		cwd,
-		stdout: "piped",
-		stderr: "piped",
-	}).output();
-	if (code !== 0) {
-		throw new Error(
-			`git ${args.join(" ")} failed: ${new TextDecoder().decode(stderr)}`,
-		);
-	}
-	return new TextDecoder().decode(stdout).trim();
-}
 
 /** Paths touched by the commit at `rev`, sorted. */
 async function filesIn(repo: string, rev: string): Promise<string[]> {
@@ -392,14 +358,14 @@ async function filesIn(repo: string, rev: string): Promise<string[]> {
 
 async function exists(path: string): Promise<boolean> {
 	try {
-		await Deno.stat(path);
+		await stat(path);
 		return true;
 	} catch {
 		return false;
 	}
 }
 
-Deno.test("--before-commit: the command's output lands in the tagged commit", async () => {
+test("--before-commit: the command's output lands in the tagged commit", async () => {
 	const repo = await makeRepo({ "package.json": PKG_TABS });
 	const { code, out } = await release(
 		repo,
@@ -409,18 +375,18 @@ Deno.test("--before-commit: the command's output lands in the tagged commit", as
 		"--before-commit",
 		"cp package.json built.json",
 	);
-	assertEquals(code, 0, out);
+	assert.deepEqual(code, 0, out);
 
 	// built from the *bumped* manifest — the whole point of the option
 	const built = await gitOut(repo, "show", "HEAD:built.json");
-	assertEquals(JSON.parse(built).version, "2.0.2");
-	assertEquals(await filesIn(repo, "HEAD"), ["built.json", "package.json"]);
-	assertEquals(
+	assert.deepEqual(JSON.parse(built).version, "2.0.2");
+	assert.deepEqual(await filesIn(repo, "HEAD"), ["built.json", "package.json"]);
+	assert.deepEqual(
 		await gitOut(repo, "rev-parse", "v2.0.2^{commit}"),
 		await gitOut(repo, "rev-parse", "HEAD"),
 		"tag does not point at the release commit",
 	);
-	assertEquals(await gitOut(repo, "status", "--porcelain"), "", "tree left dirty");
+	assert.deepEqual(await gitOut(repo, "status", "--porcelain"), "", "tree left dirty");
 
 	assert(
 		out.includes("Run before commit: cp package.json built.json"),
@@ -433,7 +399,7 @@ Deno.test("--before-commit: the command's output lands in the tagged commit", as
 	assert(out.includes("$ git add -A"), `whole tree not staged:\n${out}`);
 });
 
-Deno.test("--before-commit=<cmd> form behaves identically", async () => {
+test("--before-commit=<cmd> form behaves identically", async () => {
 	const repo = await makeRepo({ "package.json": PKG_TABS });
 	const { code, out } = await release(
 		repo,
@@ -441,27 +407,27 @@ Deno.test("--before-commit=<cmd> form behaves identically", async () => {
 		"patch",
 		"--before-commit=cp package.json built.json",
 	);
-	assertEquals(code, 0, out);
-	assertEquals(
+	assert.deepEqual(code, 0, out);
+	assert.deepEqual(
 		JSON.parse(await gitOut(repo, "show", "HEAD:built.json")).version,
 		"2.0.2",
 	);
-	assertEquals(await filesIn(repo, "HEAD"), ["built.json", "package.json"]);
+	assert.deepEqual(await filesIn(repo, "HEAD"), ["built.json", "package.json"]);
 });
 
-Deno.test("--before-commit: RELEASE_* env vars describe the release", async () => {
+test("--before-commit: RELEASE_* env vars describe the release", async () => {
 	const repo = await makeRepo({ "package.json": PKG_TABS });
 	const cmd =
 		'printf "%s|%s|%s|%s" "$RELEASE_VERSION" "$RELEASE_PREV_VERSION" "$RELEASE_TAG" "$RELEASE_MANIFEST" > env.txt';
 	const { code, out } = await release(repo, "--yes", "patch", "--before-commit", cmd);
-	assertEquals(code, 0, out);
-	assertEquals(
+	assert.deepEqual(code, 0, out);
+	assert.deepEqual(
 		await gitOut(repo, "show", "HEAD:env.txt"),
 		"2.0.2|2.0.1|v2.0.2|package.json",
 	);
 });
 
-Deno.test("--before-commit: git-ignored output is not staged", async () => {
+test("--before-commit: git-ignored output is not staged", async () => {
 	const repo = await makeRepo({ "package.json": PKG_TABS, ".gitignore": "out/\n" });
 	const { code, out } = await release(
 		repo,
@@ -470,17 +436,17 @@ Deno.test("--before-commit: git-ignored output is not staged", async () => {
 		"--before-commit",
 		"mkdir -p out && touch out/x",
 	);
-	assertEquals(code, 0, out);
+	assert.deepEqual(code, 0, out);
 	assert(await exists(`${repo}/out/x`), "command did not run");
-	assertEquals(await filesIn(repo, "HEAD"), ["package.json"]);
-	assertEquals(
+	assert.deepEqual(await filesIn(repo, "HEAD"), ["package.json"]);
+	assert.deepEqual(
 		await gitOut(repo, "status", "--porcelain"),
 		"",
 		"ignored output shows as dirty",
 	);
 });
 
-Deno.test("--before-commit: the lockfile is synced before the command runs", async () => {
+test("--before-commit: the lockfile is synced before the command runs", async () => {
 	// an npm build reading package-lock.json must already see the new version
 	const repo = await makeRepo({
 		"package.json": PKG_TABS,
@@ -493,19 +459,19 @@ Deno.test("--before-commit: the lockfile is synced before the command runs", asy
 		"--before-commit",
 		"cp package-lock.json lock-copy.json",
 	);
-	assertEquals(code, 0, out);
-	assertEquals(
+	assert.deepEqual(code, 0, out);
+	assert.deepEqual(
 		JSON.parse(await gitOut(repo, "show", "HEAD:lock-copy.json")).version,
 		"2.0.2",
 	);
-	assertEquals(await filesIn(repo, "HEAD"), [
+	assert.deepEqual(await filesIn(repo, "HEAD"), [
 		"lock-copy.json",
 		"package-lock.json",
 		"package.json",
 	]);
 });
 
-Deno.test("--before-commit: a failing command aborts and restores the bump", async () => {
+test("--before-commit: a failing command aborts and restores the bump", async () => {
 	const repo = await makeRepo({
 		"package.json": PKG_TABS,
 		"package-lock.json": LOCK_TABS,
@@ -518,7 +484,7 @@ Deno.test("--before-commit: a failing command aborts and restores the bump", asy
 		"--before-commit",
 		"touch leftover.txt && exit 3",
 	);
-	assertEquals(code, 1, out);
+	assert.deepEqual(code, 1, out);
 	assert(out.includes("exit 3"), `exit code not reported:\n${out}`);
 	assert(out.includes("touch leftover.txt && exit 3"), `command not named:\n${out}`);
 	assert(
@@ -527,21 +493,21 @@ Deno.test("--before-commit: a failing command aborts and restores the bump", asy
 	);
 
 	// what the tool itself wrote is restored byte-for-byte …
-	assertEquals(await Deno.readTextFile(`${repo}/package.json`), PKG_TABS);
-	assertEquals(await Deno.readTextFile(`${repo}/package-lock.json`), LOCK_TABS);
+	assert.deepEqual(await read(`${repo}/package.json`), PKG_TABS);
+	assert.deepEqual(await read(`${repo}/package-lock.json`), LOCK_TABS);
 	// … nothing was committed or tagged …
-	assertEquals(await state(repo), before);
-	assertEquals(await tagsIn(repo), []);
+	assert.deepEqual(await state(repo), before);
+	assert.deepEqual(await tagsIn(repo), []);
 	// … and the command's own leftovers are the user's to inspect, not ours to clean
 	assert(
 		await exists(`${repo}/leftover.txt`),
 		"tool must not delete the command's files",
 	);
 	assert(out.includes("git status"), `no pointer to leftovers:\n${out}`);
-	assertEquals(await gitOut(repo, "status", "--porcelain"), "?? leftover.txt");
+	assert.deepEqual(await gitOut(repo, "status", "--porcelain"), "?? leftover.txt");
 });
 
-Deno.test("--before-commit: --dry-run previews the command without running it", async () => {
+test("--before-commit: --dry-run previews the command without running it", async () => {
 	const repo = await makeRepo({ "package.json": PKG_TABS });
 	const before = await state(repo);
 	const { code, out } = await release(
@@ -551,34 +517,34 @@ Deno.test("--before-commit: --dry-run previews the command without running it", 
 		"--before-commit",
 		"touch ran.txt",
 	);
-	assertEquals(code, 0, out);
+	assert.deepEqual(code, 0, out);
 	assert(
 		out.includes("Run before commit: touch ran.txt"),
 		`preview omits the command:\n${out}`,
 	);
 	assert(!(await exists(`${repo}/ran.txt`)), "command ran under --dry-run");
-	assertEquals(await state(repo), before);
+	assert.deepEqual(await state(repo), before);
 });
 
-Deno.test("--before-commit without a value is an error, nothing mutated", async () => {
+test("--before-commit without a value is an error, nothing mutated", async () => {
 	const repo = await makeRepo({ "package.json": PKG_TABS });
 	const before = await state(repo);
 	const { code, out } = await release(repo, "--yes", "patch", "--before-commit");
-	assertEquals(code, 1, out);
+	assert.deepEqual(code, 1, out);
 	assert(out.includes("requires a value"), `unclear error:\n${out}`);
-	assertEquals(await state(repo), before);
+	assert.deepEqual(await state(repo), before);
 });
 
-Deno.test("--before-commit with an empty command is an error", async () => {
+test("--before-commit with an empty command is an error", async () => {
 	const repo = await makeRepo({ "package.json": PKG_TABS });
 	const before = await state(repo);
 	const { code, out } = await release(repo, "--yes", "patch", "--before-commit", "  ");
-	assertEquals(code, 1, out);
+	assert.deepEqual(code, 1, out);
 	assert(out.includes("non-empty"), `unclear error:\n${out}`);
-	assertEquals(await state(repo), before);
+	assert.deepEqual(await state(repo), before);
 });
 
-Deno.test("--before-commit given twice is an error, nothing mutated", async () => {
+test("--before-commit given twice is an error, nothing mutated", async () => {
 	const repo = await makeRepo({ "package.json": PKG_TABS });
 	const before = await state(repo);
 	const { code, out } = await release(
@@ -589,34 +555,34 @@ Deno.test("--before-commit given twice is an error, nothing mutated", async () =
 		"true",
 		"--before-commit=true",
 	);
-	assertEquals(code, 1, out);
+	assert.deepEqual(code, 1, out);
 	assert(out.includes("only once") && out.includes("&&"), `unclear error:\n${out}`);
-	assertEquals(await state(repo), before);
-	assertEquals(await tagsIn(repo), []);
+	assert.deepEqual(await state(repo), before);
+	assert.deepEqual(await tagsIn(repo), []);
 });
 
-Deno.test("--before-commit typo gets a did-you-mean", async () => {
+test("--before-commit typo gets a did-you-mean", async () => {
 	const repo = await makeRepo({ "package.json": PKG_TABS });
 	const { code, out } = await release(repo, "--before-comit", "true");
-	assertEquals(code, 1, out);
+	assert.deepEqual(code, 1, out);
 	assert(out.includes("--before-commit"), `no suggestion offered:\n${out}`);
 });
 
-Deno.test("without --before-commit only the manifest is staged, never the whole tree", async () => {
+test("without --before-commit only the manifest is staged, never the whole tree", async () => {
 	// In a clean tree both forms yield the same commit, so the verbose trace is
 	// the evidence that the targeted `git add` path is still the default.
 	const repo = await makeRepo({ "package.json": PKG_TABS });
 	const { code, out } = await release(repo, "--yes", "--verbose", "patch");
-	assertEquals(code, 0, out);
+	assert.deepEqual(code, 0, out);
 	assert(out.includes("$ git add package.json"), `targeted add missing:\n${out}`);
 	assert(
 		!out.includes("git add -A"),
 		`whole tree staged without --before-commit:\n${out}`,
 	);
-	assertEquals(await filesIn(repo, "HEAD"), ["package.json"]);
+	assert.deepEqual(await filesIn(repo, "HEAD"), ["package.json"]);
 });
 
-Deno.test("--before-commit: a later git failure widens the rollback hint to the whole tree", async () => {
+test("--before-commit: a later git failure widens the rollback hint to the whole tree", async () => {
 	const repo = await makeRepo({ "package.json": PKG_TABS });
 	// pre-flight only asks for origin's URL; the push itself is what fails
 	await git(repo, "remote", "set-url", "origin", `${repo}/../does-not-exist.git`);
@@ -627,20 +593,20 @@ Deno.test("--before-commit: a later git failure widens the rollback hint to the 
 		"--before-commit",
 		"cp package.json built.json",
 	);
-	assertEquals(code, 1, out);
+	assert.deepEqual(code, 1, out);
 	assert(out.includes("partially-released"), `no rollback hint:\n${out}`);
 	assert(out.includes("git checkout HEAD -- ."), `hint not widened:\n${out}`);
 	// the command did run and its output was committed before the push failed
-	assertEquals(await filesIn(repo, "HEAD"), ["built.json", "package.json"]);
+	assert.deepEqual(await filesIn(repo, "HEAD"), ["built.json", "package.json"]);
 });
 
-Deno.test("clean check sees untracked files even under status.showUntrackedFiles=no", async () => {
+test("clean check sees untracked files even under status.showUntrackedFiles=no", async () => {
 	// `git status --porcelain` honours that setting; without an explicit
 	// --untracked-files the stray file would pass pre-flight and then be swept
 	// into the release commit by `git add -A`.
 	const repo = await makeRepo({ "package.json": PKG_TABS });
 	await git(repo, "config", "status.showUntrackedFiles", "no");
-	await Deno.writeTextFile(`${repo}/stray.txt`, "oops\n");
+	await writeFile(`${repo}/stray.txt`, "oops\n");
 	const before = await state(repo);
 	const { code, out } = await release(
 		repo,
@@ -649,8 +615,8 @@ Deno.test("clean check sees untracked files even under status.showUntrackedFiles
 		"--before-commit",
 		"true",
 	);
-	assertEquals(code, 1, out);
+	assert.deepEqual(code, 1, out);
 	assert(out.includes("uncommitted changes"), `unclear error:\n${out}`);
-	assertEquals(await state(repo), before);
-	assertEquals(await tagsIn(repo), []);
+	assert.deepEqual(await state(repo), before);
+	assert.deepEqual(await tagsIn(repo), []);
 });
