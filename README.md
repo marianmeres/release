@@ -95,9 +95,9 @@ pnpm add -D @marianmeres/release    # or: npm install -D @marianmeres/release
 
 ```json
 {
-	"scripts": {
-		"release": "release"
-	}
+  "scripts": {
+    "release": "release"
+  }
 }
 ```
 
@@ -120,9 +120,9 @@ deno run -A jsr:@marianmeres/release --dry-run minor
 
 ```json
 {
-	"tasks": {
-		"release": "deno run -A jsr:@marianmeres/release"
-	}
+  "tasks": {
+    "release": "deno run -A jsr:@marianmeres/release"
+  }
 }
 ```
 
@@ -153,9 +153,9 @@ tag on the remote:
 
 ```json
 {
-	"scripts": {
-		"rp": "npm run build && release patch --no-push -y && npm publish && git push --follow-tags"
-	}
+  "scripts": {
+    "rp": "npm run build && release patch --no-push -y && npm publish && git push --follow-tags"
+  }
 }
 ```
 
@@ -225,10 +225,10 @@ with the manifest** (`git add -A`, honouring `.gitignore`):
 
 ```json
 {
-	"scripts": {
-		"build": "vite build",
-		"release": "release --before-commit \"npm run build\""
-	}
+  "scripts": {
+    "build": "vite build",
+    "release": "release --before-commit \"npm run build\""
+  }
 }
 ```
 

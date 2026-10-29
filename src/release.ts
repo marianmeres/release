@@ -115,9 +115,7 @@ async function runOrExit(cmd: Argv): Promise<string> {
 async function runOrThrow(cmd: Argv): Promise<string> {
 	const { code, stdout, stderr } = await run(cmd);
 	if (code !== 0) {
-		throw new Error(
-			`Command failed: ${cmd.join(" ")}${stderr ? `\n${stderr}` : ""}`,
-		);
+		throw new Error(`Command failed: ${cmd.join(" ")}${stderr ? `\n${stderr}` : ""}`);
 	}
 	return stdout;
 }
@@ -200,9 +198,9 @@ function parseVersion(version: string): ParsedSemver {
 	const m = SEMVER_RE.exec(version);
 	if (!m) {
 		throw new Error(
-			`Invalid version format: ${
-				JSON.stringify(version)
-			} (expected "X.Y.Z" or "X.Y.Z-prerelease" with non-negative integers)`,
+			`Invalid version format: ${JSON.stringify(
+				version,
+			)} (expected "X.Y.Z" or "X.Y.Z-prerelease" with non-negative integers)`,
 		);
 	}
 	return {
@@ -305,10 +303,7 @@ function serializeLike(originalText: string, value: unknown): string {
  * const patched = syncPackageLockVersion(await readFile("package-lock.json", "utf8"), "1.2.4");
  * ```
  */
-export function syncPackageLockVersion(
-	lockText: string,
-	newVersion: string,
-): string {
+export function syncPackageLockVersion(lockText: string, newVersion: string): string {
 	const lock = JSON.parse(lockText) as Record<string, unknown>;
 	let found = false;
 
@@ -377,7 +372,8 @@ const KNOWN_FLAGS = [
  * "1.2.3" as the message.
  */
 const RETIRED_FLAGS: Record<string, string> = {
-	"-v": 'pass the version as a positional argument instead (e.g. "1.2.3"), ' +
+	"-v":
+		'pass the version as a positional argument instead (e.g. "1.2.3"), ' +
 		"or use --verbose for a command trace",
 	"-d": "multi-directory mode was dropped; release each package separately",
 	"--dir": "multi-directory mode was dropped; release each package separately",
@@ -411,8 +407,7 @@ function unknownFlagError(flag: string): Error {
 	if (retired) {
 		return new Error(`Unknown option '${flag}' — ${retired}.`);
 	}
-	const near = KNOWN_FLAGS
-		.map((f) => [f, editDistance(flag, f)] as const)
+	const near = KNOWN_FLAGS.map((f) => [f, editDistance(flag, f)] as const)
 		.filter(([, d]) => d <= 3)
 		.sort((a, b) => a[1] - b[1])[0];
 	const hint = near
@@ -607,9 +602,7 @@ async function resolveManifest(): Promise<ResolvedManifest> {
 		try {
 			data = JSON.parse(text);
 		} catch (e) {
-			console.error(
-				red(`Error: Failed to parse ${path}: ${(e as Error).message}`),
-			);
+			console.error(red(`Error: Failed to parse ${path}: ${(e as Error).message}`));
 			process.exit(1);
 		}
 		const version = data.version;
@@ -618,9 +611,7 @@ async function resolveManifest(): Promise<ResolvedManifest> {
 	}
 
 	console.error(
-		red(
-			`Error: No string 'version' field found in ${candidates.join(" / ")}`,
-		),
+		red(`Error: No string 'version' field found in ${candidates.join(" / ")}`),
 	);
 	process.exit(1);
 }
@@ -672,11 +663,7 @@ export async function main(): Promise<void> {
 	}
 
 	// Check if we're in a git repository (works for submodules too)
-	const { code: gitCheck } = await run([
-		"git",
-		"rev-parse",
-		"--is-inside-work-tree",
-	]);
+	const { code: gitCheck } = await run(["git", "rev-parse", "--is-inside-work-tree"]);
 	if (gitCheck !== 0) {
 		console.error(red("Error: Not in a git repository"));
 		process.exit(1);
@@ -721,12 +708,7 @@ export async function main(): Promise<void> {
 	}
 
 	// Branch check
-	const currentBranch = await runOrExit([
-		"git",
-		"rev-parse",
-		"--abbrev-ref",
-		"HEAD",
-	]);
+	const currentBranch = await runOrExit(["git", "rev-parse", "--abbrev-ref", "HEAD"]);
 	if (currentBranch !== "main" && currentBranch !== "master") {
 		console.log(
 			yellow(
@@ -755,9 +737,7 @@ export async function main(): Promise<void> {
 	if (spec.kind === "exact") {
 		newVersion = spec.version;
 		if (newVersion === currentVersion) {
-			console.error(
-				red(`Error: ${newVersion} is already the current version.`),
-			);
+			console.error(red(`Error: ${newVersion} is already the current version.`));
 			process.exit(1);
 		}
 	} else {
@@ -808,7 +788,7 @@ export async function main(): Promise<void> {
 	// the manifest alone would break CI for the repo we just released.
 	let lockPath: string | null = null;
 	let lockText = "";
-	if (manifestPath === NPM_MANIFEST && await fileExists(NPM_LOCKFILE)) {
+	if (manifestPath === NPM_MANIFEST && (await fileExists(NPM_LOCKFILE))) {
 		// `git add` fails on ignored paths — catch that here rather than mid-release
 		const { code: isIgnored } = await run([
 			"git",
@@ -818,9 +798,7 @@ export async function main(): Promise<void> {
 		]);
 		if (isIgnored === 0) {
 			console.log(
-				yellow(
-					`Warning: ${NPM_LOCKFILE} is git-ignored — leaving it untouched.`,
-				),
+				yellow(`Warning: ${NPM_LOCKFILE} is git-ignored — leaving it untouched.`),
 			);
 		} else {
 			lockText = await readFile(NPM_LOCKFILE, "utf8");
@@ -828,9 +806,9 @@ export async function main(): Promise<void> {
 				JSON.parse(lockText);
 			} catch (e) {
 				console.error(
-					red(`Error: Failed to parse ${NPM_LOCKFILE}: ${
-						(e as Error).message
-					}`),
+					red(
+						`Error: Failed to parse ${NPM_LOCKFILE}: ${(e as Error).message}`,
+					),
 				);
 				process.exit(1);
 			}
@@ -847,18 +825,18 @@ export async function main(): Promise<void> {
 	console.log();
 	console.log(dryRun ? "This WOULD (dry run):" : "This will:");
 	console.log(
-		`  - Set version to ${green(newVersion)} in ${manifestPath} ${
-			dim(spec.kind === "exact" ? "(exact)" : `(${bold(spec.type)} bump)`)
-		}`,
+		`  - Set version to ${green(newVersion)} in ${manifestPath} ${dim(
+			spec.kind === "exact" ? "(exact)" : `(${bold(spec.type)} bump)`,
+		)}`,
 	);
 	if (lockPath) {
 		console.log(`  - Sync the root version in ${lockPath}`);
 	}
 	if (beforeCommit) {
 		console.log(
-			`  - Run before commit: ${beforeCommit} ${
-				dim("(and stage whatever it changes)")
-			}`,
+			`  - Run before commit: ${beforeCommit} ${dim(
+				"(and stage whatever it changes)",
+			)}`,
 		);
 	}
 	console.log(`  - Create a git commit: '${commitMessage}'`);
@@ -919,9 +897,8 @@ export async function main(): Promise<void> {
 			);
 			// Restore exactly what *we* wrote; anything the command left behind
 			// is the user's to inspect — `git clean` would be guesswork.
-			const written = lockWritten && lockPath
-				? [manifestPath, lockPath]
-				: [manifestPath];
+			const written =
+				lockWritten && lockPath ? [manifestPath, lockPath] : [manifestPath];
 			try {
 				await writeFile(manifestPath, manifestText);
 				if (lockWritten && lockPath) await writeFile(lockPath, lockText);
@@ -935,9 +912,9 @@ export async function main(): Promise<void> {
 					),
 				);
 				console.error(
-					`  git checkout HEAD -- ${
-						written.join(" ")
-					}   # discard the version bump`,
+					`  git checkout HEAD -- ${written.join(
+						" ",
+					)}   # discard the version bump`,
 				);
 			}
 			console.error(

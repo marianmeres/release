@@ -238,12 +238,12 @@ the new version, and it must land in the tagged commit (deploys of the form
 No dependencies. Everything outside the language comes from `node:*`, which Node
 and Deno both provide:
 
-| Module                 | Used for                                                     |
-| ---------------------- | ------------------------------------------------------------ |
-| `node:child_process`   | `spawn`: git (piped) and the before-commit hook (inherited)  |
-| `node:fs/promises`     | `stat`, `readFile`, `writeFile` for manifest and lockfile     |
-| `node:process`         | `argv`, `env`, `exit`, `platform` (`sh -c` vs `cmd /c`)      |
-| `node:readline`        | the y/N prompts                                              |
+| Module               | Used for                                                    |
+| -------------------- | ----------------------------------------------------------- |
+| `node:child_process` | `spawn`: git (piped) and the before-commit hook (inherited) |
+| `node:fs/promises`   | `stat`, `readFile`, `writeFile` for manifest and lockfile   |
+| `node:process`       | `argv`, `env`, `exit`, `platform` (`sh -c` vs `cmd /c`)     |
+| `node:readline`      | the y/N prompts                                             |
 
 ## Requirements for Target Projects
 

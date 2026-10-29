@@ -17,7 +17,9 @@ const CLI = fileURLToPath(new URL("../src/release.ts", import.meta.url));
 
 /** How the CLI is started: Node by default, Deno under `CLI_RUNTIME=deno`. */
 const CLI_ARGV: [string, ...string[]] =
-	process.env.CLI_RUNTIME === "deno" ? ["deno", "run", "-A", CLI] : [process.execPath, CLI];
+	process.env.CLI_RUNTIME === "deno"
+		? ["deno", "run", "-A", CLI]
+		: [process.execPath, CLI];
 
 /** Spawn `file args` in `cwd`; resolves with the exit code and captured output. */
 function exec(
@@ -78,10 +80,8 @@ async function release(
 	return { code, out: stdout + stderr };
 }
 
-const PKG_TABS =
-	`{\n\t"name": "@scope/app",\n\t"version": "2.0.1",\n\t"private": true\n}\n`;
-const LOCK_TABS =
-	`{\n\t"name": "@scope/app",\n\t"version": "2.0.1",\n\t"lockfileVersion": 3,\n\t"packages": {\n\t\t"": {\n\t\t\t"name": "@scope/app",\n\t\t\t"version": "2.0.1"\n\t\t}\n\t}\n}\n`;
+const PKG_TABS = `{\n\t"name": "@scope/app",\n\t"version": "2.0.1",\n\t"private": true\n}\n`;
+const LOCK_TABS = `{\n\t"name": "@scope/app",\n\t"version": "2.0.1",\n\t"lockfileVersion": 3,\n\t"packages": {\n\t\t"": {\n\t\t\t"name": "@scope/app",\n\t\t\t"version": "2.0.1"\n\t\t}\n\t}\n}\n`;
 
 test("resolution order: deno.json wins over jsr.json wins over package.json", async () => {
 	const repo = await makeRepo({
@@ -132,7 +132,12 @@ test("npm release bumps package.json + lockfile, preserving tabs", async () => {
 
 	// tree is clean (both files were committed) and the tag exists
 	assert.deepEqual(await gitOut(repo, "status", "--porcelain"), "");
-	const tag = await exec(repo, "git", ["rev-parse", "-q", "--verify", "refs/tags/v2.0.2"]);
+	const tag = await exec(repo, "git", [
+		"rev-parse",
+		"-q",
+		"--verify",
+		"refs/tags/v2.0.2",
+	]);
 	assert.deepEqual(tag.code, 0, "tag v2.0.2 was not created");
 });
 
@@ -163,10 +168,7 @@ test("absent lockfile is a silent no-op", async () => {
 	const { code, out } = await release(repo, "--yes", "patch");
 	assert.deepEqual(code, 0, out);
 	assert(!out.includes("package-lock.json"), `unexpected lockfile chatter:\n${out}`);
-	assert.deepEqual(
-		JSON.parse(await read(`${repo}/package.json`)).version,
-		"2.0.2",
-	);
+	assert.deepEqual(JSON.parse(await read(`${repo}/package.json`)).version, "2.0.2");
 });
 
 test("deno.json release leaves package-lock.json alone", async () => {
@@ -205,7 +207,10 @@ test("git-ignored lockfile is warned about, not staged", async () => {
 /** Version currently in package.json + the repo's commit count. */
 async function state(repo: string): Promise<{ version: string; commits: number }> {
 	const version = JSON.parse(await read(`${repo}/package.json`)).version;
-	return { version, commits: Number(await gitOut(repo, "rev-list", "--count", "HEAD")) };
+	return {
+		version,
+		commits: Number(await gitOut(repo, "rev-list", "--count", "HEAD")),
+	};
 }
 
 async function tagsIn(dir: string): Promise<string[]> {

@@ -30,7 +30,7 @@ tmp/                        scratch, gitignored
 
 1. **Runtime policy**: Node at the keyboard and in production, npm as the registry. No
    `Deno.*`, `Bun.*`, `jsr:` or `npm:` specifiers; `node:*` only (no dependencies). Deno
-   is a *consumer* runtime here (JSR consumers), not a dev runtime: `pnpm run test:deno`
+   is a _consumer_ runtime here (JSR consumers), not a dev runtime: `pnpm run test:deno`
    runs the e2e suite with the CLI on Deno.
 2. **Erasable TypeScript**: no `enum`, `namespace`, constructor parameter properties;
    `import type` for types; explicit `.ts` import extensions. `pnpm run typecheck` is the
@@ -52,12 +52,12 @@ tmp/                        scratch, gitignored
 ## Before Making Changes
 
 - [ ] Behaviour change: update [docs/cli.md](./docs/cli.md), add an e2e test, note it in
-      [docs/changes.md](./docs/changes.md)
+  [docs/changes.md](./docs/changes.md)
 - [ ] New flag: also `usage()`, `KNOWN_FLAGS` (did-you-mean), the README options table
 - [ ] `pnpm run ci`; also `pnpm run test:deno` when touching process / fs / child process
-      code
+  code
 - [ ] Consumers pin this tool in their lockfiles: a new flag reaches them only after they
-      bump the pinned version
+  bump the pinned version
 
 ## Documentation Index
 
