@@ -25,24 +25,23 @@ test("bumpVersion: a prerelease promotes to the release it precedes", () => {
 });
 
 test("syncPackageLockVersion: lockfileVersion 3 updates both fields", () => {
-	const lock =
-		JSON.stringify(
-			{
-				name: "@marianmeres/tempo",
-				version: "2.0.1",
-				lockfileVersion: 3,
-				packages: {
-					"": {
-						name: "@marianmeres/tempo",
-						version: "2.0.1",
-						license: "UNLICENSED",
-					},
-					"node_modules/foo": { version: "1.0.0" },
+	const lock = `${JSON.stringify(
+		{
+			name: "@marianmeres/tempo",
+			version: "2.0.1",
+			lockfileVersion: 3,
+			packages: {
+				"": {
+					name: "@marianmeres/tempo",
+					version: "2.0.1",
+					license: "UNLICENSED",
 				},
+				"node_modules/foo": { version: "1.0.0" },
 			},
-			null,
-			2,
-		) + "\n";
+		},
+		null,
+		2,
+	)}\n`;
 
 	const out = JSON.parse(syncPackageLockVersion(lock, "2.1.0"));
 	assert.deepEqual(out.version, "2.1.0");

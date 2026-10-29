@@ -1,0 +1,40 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pnpm run *)",
+      "Bash(pnpm test*)",
+      "Bash(pnpm install*)",
+      "Bash(pnpm exec *)",
+      "Bash(pnpm biome *)",
+      "Bash(pnpm tsc *)",
+      "Bash(node *)",
+      "Bash(ls *)",
+      "Bash(cat *)",
+      "Bash(mkdir *)",
+      "Bash(wc *)",
+      "Bash(head *)",
+      "Bash(tail *)",
+      "Bash(grep *)",
+      "Bash(diff *)",
+      "Bash(which *)"
+    ],
+    "deny": [
+      "Bash(git push*)",
+      "Bash(git reset*)",
+      "Bash(git clean*)",
+      "Bash(git rebase*)",
+      "Bash(git remote*)",
+      "Bash(npm publish*)",
+      "Bash(pnpm publish*)",
+      "Bash(bun publish*)",
+      "Bash(pnpm run release*)",
+      "Bash(pnpm run rp*)",
+      "Bash(deno run -A jsr:@marianmeres/release*)",
+      "Bash(pnpm run publish*)",
+      "Bash(deno publish*)",
+      "Bash(npm deprecate*)",
+      "Bash(node src/release.ts*)",
+      "Bash(npx @marianmeres/release*)"
+    ]
+  }
+}
