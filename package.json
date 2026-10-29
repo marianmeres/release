@@ -1,6 +1,6 @@
 {
   "name": "@marianmeres/release",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "description": "Opinionated release CLI: bump the version in package.json / jsr.json / deno.json, commit, tag, push.",
   "license": "MIT",
   "author": "Marian Meres",
